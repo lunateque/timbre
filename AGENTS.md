@@ -24,6 +24,9 @@ whole workspace is kept honest by one command: `just ci`.
 
 ## Logging
 
+- Everything observable is logged: every request, every failure crossing a
+  boundary, every background job's start and end, every external effect, as a
+  typed event with the request id when there is one.
 - Log events are `LogEvent` constants declared in a crate's `log_events.rs`,
   named `<module>.<snake_case_name>`; the name is checked when the code
   compiles.
