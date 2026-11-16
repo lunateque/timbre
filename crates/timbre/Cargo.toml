@@ -1,0 +1,18 @@
+[package]
+name = "timbre"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+timbre-kernel.workspace = true
+timbre-hello = { workspace = true, optional = true }
+
+[features]
+default = ["hello"]
+hello = ["dep:timbre-hello"]

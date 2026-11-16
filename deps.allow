@@ -1,0 +1,2 @@
+# One external crate per line: <crate-name> <reason it is allowed>.
+# Only crates under crates/edge/ may depend on the crates listed here.
