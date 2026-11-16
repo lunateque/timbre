@@ -80,9 +80,13 @@ pub(crate) mod tests {
         Logger::new(LogFilter::default(), Format::Json, Box::new(sink), fixed)
     }
 
+    pub(crate) fn test_runtime() -> Arc<crate::ThreadRuntime> {
+        Arc::new(crate::ThreadRuntime::new())
+    }
+
     #[test]
     fn an_unprovided_port_is_absent() {
-        let kernel = Registry::new().finish(test_logger(Shared::default()));
+        let kernel = Registry::new().finish(test_logger(Shared::default()), test_runtime());
         let ctx = Ctx::root(&kernel);
         assert!(ctx.ports().get::<dyn Recorder>().is_none());
     }
@@ -94,7 +98,7 @@ pub(crate) mod tests {
         registry
             .provide::<dyn Recorder>(Arc::clone(&recorder))
             .expect("first provider");
-        let kernel = registry.finish(test_logger(Shared::default()));
+        let kernel = registry.finish(test_logger(Shared::default()), test_runtime());
         let ctx = Ctx::root(&kernel);
         let got = ctx.ports().get::<dyn Recorder>().expect("provided port");
         assert!(Arc::ptr_eq(&got, &recorder));

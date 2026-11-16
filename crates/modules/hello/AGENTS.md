@@ -3,7 +3,8 @@
 ## Purpose
 
 An example module that exists to exercise the kernel contracts end to end:
-registration, a `Started` handler and a logged event.
+registration, a `Started` handler and a logged event, a route, a CLI command
+and a declared permission.
 
 ## Ports
 
@@ -11,7 +12,9 @@ None.
 
 ## Signals
 
-Handles `signals::Started` by logging `hello.greeted`.
+Handles `signals::Started` by logging `hello.greeted`. Declares the permission
+`hello.greet`, answers `GET /hello` with plain text and contributes the
+`hello` CLI command, which logs the same event.
 
 ## Failures
 

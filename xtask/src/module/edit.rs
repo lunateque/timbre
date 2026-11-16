@@ -80,7 +80,10 @@ pub(crate) fn remove_feature(text: &str, id: &str, ids: &[String]) -> Outcome<St
 
 /// The root `[workspace]` `members` line, rewritten wholesale. An explicit list, not a
 /// `crates/modules/*` glob, because cargo treats an unmatched glob as a literal path and
-/// the whole workspace stops loading once the last module is removed.
+/// the whole workspace stops loading once the last module is removed. Entries that are
+/// not modules (the kernel, the binary, the edge crates, xtask) keep their order; the
+/// sorted `crates/modules/<id>` block is (re)inserted right after `crates/timbre`, where
+/// the old list carried it.
 pub(crate) fn set_members(text: &str, ids: &[String]) -> Outcome<String> {
     let mut sorted = ids.to_vec();
     sorted.sort();
@@ -88,12 +91,26 @@ pub(crate) fn set_members(text: &str, ids: &[String]) -> Outcome<String> {
         .iter()
         .map(|id| format!("\"crates/modules/{id}\""))
         .collect();
-    let mut parts: Vec<String> = vec![
-        "\"crates/kernel\"".to_owned(),
-        "\"crates/timbre\"".to_owned(),
-    ];
-    parts.extend(modules);
-    parts.push("\"xtask\"".to_owned());
+    let line_start = text
+        .lines()
+        .find(|line| line.starts_with("members = "))
+        .ok_or_else(|| format!("{ROOT_MANIFEST}: the line `members = [...]` is missing"))?;
+    let mut parts: Vec<String> = Vec::new();
+    for entry in line_start
+        .trim_start_matches("members = ")
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(',')
+    {
+        let entry = entry.trim();
+        if entry.is_empty() || entry.trim_matches('"').starts_with("crates/modules/") {
+            continue;
+        }
+        parts.push(entry.to_owned());
+        if entry.trim_matches('"') == "crates/timbre" {
+            parts.extend(modules.iter().cloned());
+        }
+    }
     let line = format!("members = [{}]", parts.join(", "));
     replace_prefix(text, "members = ", &line, ROOT_MANIFEST, "members = [...]")
 }
@@ -261,5 +278,17 @@ mod tests {
         );
         assert_eq!(set_members(&with, &ids(&[])).expect("anchor exists"), text);
         assert!(set_members("[workspace]\n", &ids(&[])).is_err());
+    }
+
+    #[test]
+    fn entries_that_are_not_modules_survive_the_rewrite() {
+        // Edge crates sit between the binary and xtask and must not be lost
+        // when the module block is rebuilt.
+        let text = "[workspace]\nmembers = [\"crates/kernel\", \"crates/timbre\", \"crates/modules/old\", \"crates/edge/sqlite\", \"xtask\"]\n";
+        let with = set_members(text, &ids(&["new"])).expect("anchor exists");
+        assert_eq!(
+            with,
+            "[workspace]\nmembers = [\"crates/kernel\", \"crates/timbre\", \"crates/modules/new\", \"crates/edge/sqlite\", \"xtask\"]\n"
+        );
     }
 }

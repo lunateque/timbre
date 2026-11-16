@@ -61,7 +61,7 @@ mod tests {
     use crate::failures::KernelFailure;
     use crate::log::log_tests::{Shared, fixed};
     use crate::port::tests::{Recorder, RecorderImpl};
-    use crate::{Ctx, Format, LogFilter, Logger, Registry};
+    use crate::{Ctx, Format, LogFilter, Logger, Registry, ThreadRuntime};
     use std::sync::Arc;
 
     struct Ping;
@@ -95,12 +95,15 @@ mod tests {
             .expect("first provider");
         registry.on::<Ping>(first);
         registry.on::<Ping>(second);
-        let kernel = registry.finish(Logger::new(
-            LogFilter::default(),
-            Format::Json,
-            Box::new(sink.clone()),
-            fixed,
-        ));
+        let kernel = registry.finish(
+            Logger::new(
+                LogFilter::default(),
+                Format::Json,
+                Box::new(sink.clone()),
+                fixed,
+            ),
+            Arc::new(ThreadRuntime::new()),
+        );
         Ctx::root(&kernel).publish(&Ping);
         assert_eq!(RecorderImpl::entries(&recorder), ["first", "second"]);
         let text = sink.text();
@@ -122,12 +125,15 @@ mod tests {
         struct Quiet;
         impl Signal for Quiet {}
         let sink = Shared::default();
-        let kernel = Registry::new().finish(Logger::new(
-            LogFilter::default(),
-            Format::Json,
-            Box::new(sink.clone()),
-            fixed,
-        ));
+        let kernel = Registry::new().finish(
+            Logger::new(
+                LogFilter::default(),
+                Format::Json,
+                Box::new(sink.clone()),
+                fixed,
+            ),
+            Arc::new(ThreadRuntime::new()),
+        );
         Ctx::root(&kernel).publish(&Quiet);
         assert_eq!(sink.text(), "");
     }

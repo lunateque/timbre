@@ -121,7 +121,10 @@ pub(crate) mod tests {
 
     pub(crate) fn kernel(sink: Shared, format: Format, filter: &str) -> Arc<Kernel> {
         let filter = LogFilter::parse(filter).expect("test filter parses");
-        Registry::new().finish(Logger::new(filter, format, Box::new(sink), fixed))
+        Registry::new().finish(
+            Logger::new(filter, format, Box::new(sink), fixed),
+            Arc::new(crate::ThreadRuntime::new()),
+        )
     }
 
     fn logged_call(ctx: &Ctx) {

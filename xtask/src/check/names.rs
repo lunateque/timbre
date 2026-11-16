@@ -106,7 +106,7 @@ pub(crate) fn check(packages: &[Package], sources: &[Source<'_>]) -> Vec<Violati
 }
 
 /// The package whose `dir` is the longest workspace-relative prefix of `path`.
-fn owner_of<'a>(packages: &'a [Package], path: &str) -> Option<&'a Package> {
+pub(crate) fn owner_of<'a>(packages: &'a [Package], path: &str) -> Option<&'a Package> {
     packages
         .iter()
         .filter(|package| path.starts_with(&format!("{}/", package.dir)))
@@ -115,7 +115,7 @@ fn owner_of<'a>(packages: &'a [Package], path: &str) -> Option<&'a Package> {
 
 /// Token indexes covered by an item annotated `#[cfg(test)]`: the attribute is followed
 /// by an item ending either at its depth-0 `;` or at its brace-balanced `{...}`.
-fn test_items(tokens: &[Token<'_>]) -> Vec<bool> {
+pub(crate) fn test_items(tokens: &[Token<'_>]) -> Vec<bool> {
     let mut skip = vec![false; tokens.len()];
     let mut index = 0;
     while let Some(window) = tokens.get(index..index + 7) {
@@ -208,7 +208,7 @@ fn declarations<'a>(tokens: &[Token<'a>], skip: &[bool]) -> Vec<Declaration<'a>>
 
 /// The inside of a Rust string literal token; escapes are rare in names and the rules
 /// here need only the prefix.
-fn unquote(text: &str) -> &str {
+pub(crate) fn unquote(text: &str) -> &str {
     let inner = text.strip_prefix('"').unwrap_or(text);
     inner.strip_suffix('"').unwrap_or(inner)
 }

@@ -8,6 +8,7 @@ pub(crate) mod banned;
 mod docs;
 mod graph;
 mod metadata;
+mod migrations;
 mod names;
 mod root;
 mod script;
@@ -107,6 +108,7 @@ pub(crate) fn run() -> Outcome<Vec<Violation>> {
     violations.extend(tiers::check(&packages, &allow_text));
     violations.extend(docs::check(&agents, &packages));
     violations.extend(names::check(&packages, &sources));
+    violations.extend(migrations::check(&packages, &sources));
     violations.extend(banned::check(&banned_list, &sources));
     violations.extend(script::check(&sources));
 

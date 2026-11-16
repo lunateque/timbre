@@ -2,16 +2,31 @@
 //! which the binary finishes into the shared `Kernel`.
 
 use crate::bus::{Bus, Handler, Signal};
+use crate::command::{Command, CommandHandler, CommandTable};
+use crate::credential::{CredentialKind, CredentialProvider, CredentialTable};
 use crate::failure::Fallible;
+use crate::failures::KernelFailure;
+use crate::identity::{Permission, PermissionEntry};
+use crate::jobs::{JobHandler, JobTable};
 use crate::log::Logger;
+use crate::migration::Migration;
 use crate::port::{Port, Ports};
+use crate::route::{RouteHandler, RouteMatch, RouteTable};
+use crate::runtime::Runtime;
 use std::sync::Arc;
 
 /// The finished, read-only service core every `Ctx` points at.
 pub struct Kernel {
     logger: Logger,
+    runtime: Arc<dyn Runtime>,
     bus: Bus,
     ports: Ports,
+    routes: RouteTable,
+    jobs: JobTable,
+    permissions: Vec<PermissionEntry>,
+    credentials: CredentialTable,
+    migrations: Vec<Migration>,
+    commands: CommandTable,
 }
 
 impl Kernel {
@@ -23,8 +38,57 @@ impl Kernel {
         &self.bus
     }
 
+    pub(crate) fn runtime(&self) -> &Arc<dyn Runtime> {
+        &self.runtime
+    }
+
+    pub(crate) fn credential_provider(
+        &self,
+        kind: CredentialKind,
+    ) -> Option<&Arc<dyn CredentialProvider>> {
+        self.credentials.get(kind)
+    }
+
+    /// Start every registered job on the runtime, logging each job's start,
+    /// end and failure. The binary calls this after `Started` is published.
+    pub fn start_jobs(&self, ctx: &crate::Ctx) {
+        self.jobs.start(ctx);
+    }
+
     pub(crate) fn ports(&self) -> &Ports {
         &self.ports
+    }
+
+    /// What the route table knows about `method` and `path`.
+    #[must_use]
+    pub fn find_route(&self, method: crate::http::Method, path: &str) -> RouteMatch {
+        self.routes.find(method, path)
+    }
+
+    /// Every declared permission, in registration order.
+    #[must_use]
+    pub fn permissions(&self) -> &[PermissionEntry] {
+        &self.permissions
+    }
+
+    /// Every migration of the registered modules, ordered by registration and
+    /// then version within each module; applying them is the database edge's job.
+    #[must_use]
+    pub fn migrations(&self) -> &[Migration] {
+        &self.migrations
+    }
+
+    /// Every registered CLI command, in registration order.
+    #[must_use]
+    pub fn commands(&self) -> Vec<Command<'_>> {
+        self.commands.list()
+    }
+
+    /// The command whose name is the longest prefix of `args`, with the words
+    /// after the name returned for the handler.
+    #[must_use]
+    pub fn find_command(&self, args: &[String]) -> Option<(CommandHandler, Vec<String>)> {
+        self.commands.find(args)
     }
 }
 
@@ -34,6 +98,12 @@ impl Kernel {
 pub struct Registry {
     bus: Bus,
     ports: Ports,
+    routes: RouteTable,
+    jobs: JobTable,
+    permissions: Vec<PermissionEntry>,
+    credentials: CredentialTable,
+    migrations: Vec<Migration>,
+    commands: CommandTable,
 }
 
 impl Registry {
@@ -66,12 +136,132 @@ impl Registry {
         self.ports.insert(implementation)
     }
 
-    /// Freeze the registrations into the kernel, paired with its logger.
-    pub fn finish(self, logger: Logger) -> Arc<Kernel> {
+    /// Bind `handler` to `method` on `pattern`: literal segments and one
+    /// optional trailing `{name}` capture.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.route_invalid` for a malformed pattern, `kernel.route_taken`
+    /// when the method and pattern pair is registered twice.
+    pub fn route(
+        &mut self,
+        method: crate::http::Method,
+        pattern: &'static str,
+        handler: RouteHandler,
+    ) -> Fallible {
+        self.routes.add(method, pattern, handler)
+    }
+
+    /// Declare a background job, started after `Started` is published.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.job_taken` when the name is registered twice.
+    pub fn job(&mut self, name: crate::log::LogEvent, handler: JobHandler) -> Fallible {
+        self.jobs.add(name, handler)
+    }
+
+    /// Declare a permission this module checks, with the description shown to
+    /// whoever grants and revokes it.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.permission_taken` when the permission is declared twice.
+    pub fn permission(&mut self, permission: Permission, description: &'static str) -> Fallible {
+        if self
+            .permissions
+            .iter()
+            .any(|entry| entry.permission == permission)
+        {
+            return Err(Box::new(KernelFailure::PermissionTaken {
+                permission: permission.as_str(),
+            }));
+        }
+        self.permissions.push(PermissionEntry {
+            permission,
+            description,
+        });
+        Ok(())
+    }
+
+    /// Declare the single owner of credential kind `kind`.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.credential_kind_taken` when the kind already has a provider.
+    pub fn credential_provider(
+        &mut self,
+        kind: CredentialKind,
+        provider: Arc<dyn CredentialProvider>,
+    ) -> Fallible {
+        self.credentials.add(kind, provider)
+    }
+
+    /// Ship one migration step of `module`; versions apply ascending, all of a
+    /// module's pending steps at once.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.migration_taken` for a repeated module+version pair or a module
+    /// id that is not one name segment.
+    pub fn migration(&mut self, module: &'static str, version: u32, sql: &'static str) -> Fallible {
+        if !crate::migration::accepted(module, version, &self.migrations) {
+            return Err(Box::new(KernelFailure::MigrationTaken { module, version }));
+        }
+        // Keep each module's steps contiguous and ascending in version, so
+        // `Kernel::migrations` is already in application order: registration
+        // order between modules, version order within one.
+        let start = self
+            .migrations
+            .iter()
+            .take_while(|entry| entry.module() != module)
+            .count();
+        let end = self
+            .migrations
+            .iter()
+            .skip(start)
+            .take_while(|entry| entry.module() == module)
+            .count()
+            + start;
+        let at = self
+            .migrations
+            .iter()
+            .skip(start)
+            .take(end - start)
+            .filter(|entry| entry.version() < version)
+            .count()
+            + start;
+        self.migrations
+            .insert(at, Migration::new(module, version, sql));
+        Ok(())
+    }
+
+    /// Contribute a CLI command: `name` is one or more lowercase words
+    /// separated by single spaces, `help` one line for `timbre help`.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.command_invalid` for a malformed name, `kernel.command_taken`
+    /// when the name is registered twice.
+    pub fn command(&mut self, name: &str, help: &'static str, handler: CommandHandler) -> Fallible {
+        self.commands.add(name, help, handler)
+    }
+
+    /// Freeze the registrations into the kernel. The runtime is wired here,
+    /// not through a port: it is server infrastructure, and every consumer
+    /// needs it, so removability does not apply.
+    pub fn finish(self, logger: Logger, runtime: Arc<dyn Runtime>) -> Arc<Kernel> {
         Arc::new(Kernel {
             logger,
+            runtime,
             bus: self.bus,
             ports: self.ports,
+            routes: self.routes,
+            jobs: self.jobs,
+            permissions: self.permissions,
+            credentials: self.credentials,
+            migrations: self.migrations,
+            commands: self.commands,
         })
     }
 }

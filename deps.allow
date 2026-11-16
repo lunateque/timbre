@@ -2,3 +2,15 @@
 # Only crates under crates/edge/ and xtask may depend on the crates listed here.
 ra-ap-rustc_lexer the lexer of rustc itself, so xtask reads Rust source exactly as the compiler does
 serde_json reads the cargo metadata output in xtask
+serde the derive backend every edge config struct deserializes with
+toml the config file format: it keeps a value tree, so environment overrides merge before deserialization
+tokio the multi-thread executor behind the serving runtime, its timers and its signals
+hyper the HTTP/1.1 and HTTP/2 server implementation edge/http drives
+hyper-util the auto protocol-selection server connection and tokio glue for hyper
+http the shared request/response value types hyper speaks
+http-body the body trait hyper sends and receives over
+http-body-util body combinators that turn a kernel Chunks stream into a hyper body
+bytes the buffer type hyper's bodies carry
+form_urlencoded decodes application/x-www-form-urlencoded POST bodies into query pairs
+percent-encoding decodes percent-escapes in request paths
+rusqlite SQLite bindings with the bundled C sources: the only store edge/sqlite speaks
