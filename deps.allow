@@ -1,2 +1,4 @@
 # One external crate per line: <crate-name> <reason it is allowed>.
-# Only crates under crates/edge/ may depend on the crates listed here.
+# Only crates under crates/edge/ and xtask may depend on the crates listed here.
+ra-ap-rustc_lexer the lexer of rustc itself, so xtask reads Rust source exactly as the compiler does
+serde_json reads the cargo metadata output in xtask

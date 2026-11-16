@@ -1,0 +1,25 @@
+#!/bin/sh
+# Refuse anything but main and tags; validate commit messages on main.
+# Pre-push runs at the repository root, so cargo targets the right workspace.
+
+zero=0000000000000000000000000000000000000000
+
+while read -r _local_ref local_sha remote_ref remote_sha; do
+    case "$remote_ref" in
+        refs/heads/main)
+            [ "$local_sha" = "$zero" ] && continue
+            if [ "$remote_sha" = "$zero" ]; then
+                range="$local_sha"
+            else
+                range="$remote_sha..$local_sha"
+            fi
+            cargo xtask commits "$range" < /dev/null || exit 1
+            ;;
+        refs/tags/*)
+            ;;
+        *)
+            echo "refusing $remote_ref: local branches stay local, push only main and tags" >&2
+            exit 1
+            ;;
+    esac
+done

@@ -1,0 +1,43 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ci:
+    name: just ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        run: rustup toolchain install
+      - uses: taiki-e/install-action@ab49d3c64680143e184118bed66a46419fc15519 # v2.90.5
+        with:
+          tool: just@1.55.1,cargo-deny@0.20.2,cargo-machete@0.10.1,typos@1.52.2
+      # `committed` is not in that pinned install-action's manifests, so it installs
+      # from source through cargo instead of an unverified binary fallback.
+      - run: cargo install --locked committed@1.1.12
+      - run: just ci
+
+  commit-message:
+    name: cargo xtask commits --message-file
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Rust
+        run: rustup toolchain install
+      - run: cargo install --locked committed@1.1.12
+      - name: Write the PR title and body to a file
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+          BODY: ${{ github.event.pull_request.body }}
+        run: printf '%s\n\n%s\n' "$TITLE" "$BODY" > "$RUNNER_TEMP/message"
+      - run: cargo xtask commits --message-file "$RUNNER_TEMP/message"

@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/kernel", "crates/timbre", "crates/modules/*"]
+members = ["crates/kernel", "crates/timbre", "crates/modules/hello", "xtask"]
 
 [workspace.package]
 version = "0.0.0"
@@ -10,6 +10,8 @@ license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]
+ra-ap-rustc_lexer = "=0.185.0"
+serde_json = "1.0.154"
 timbre-kernel = { path = "crates/kernel" }
 timbre-hello = { path = "crates/modules/hello" }
 

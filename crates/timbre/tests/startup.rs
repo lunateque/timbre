@@ -1,5 +1,9 @@
 //! Startup behavior of the binary, observed through its real stdout.
 //! Piped stdout is never a terminal, so every line here is JSON.
+//!
+//! No module is named here: which modules are wired is the generated
+//! `modules.rs`'s business, and every combination of them is built and tested
+//! by `cargo xtask removability`.
 
 use std::process::{Command, Stdio};
 
@@ -24,27 +28,15 @@ fn run(log_value: &str) -> (Vec<String>, Option<i32>) {
 }
 
 #[test]
-fn info_starts_and_greets_when_hello_is_built_in() {
+fn info_logs_started_and_exits_successfully() {
     let (lines, code) = run("info");
     assert_eq!(code, Some(0), "startup must succeed");
-    let started = lines
-        .iter()
-        .position(|line| line.contains(r#""event":"timbre.started""#))
-        .expect("a timbre.started line");
-    if cfg!(feature = "hello") {
-        let greeting = lines
-            .get(started + 1)
-            .unwrap_or_else(|| panic!("hello must greet right after startup, lines: {lines:?}"));
-        assert!(
-            greeting.contains(r#""event":"hello.greeted""#),
-            "got {greeting}"
-        );
-    } else {
-        assert!(
-            !lines.iter().any(|line| line.contains("hello.greeted")),
-            "no hello line without the feature, lines: {lines:?}"
-        );
-    }
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(r#""event":"timbre.started""#)),
+        "a timbre.started line, got {lines:?}"
+    );
 }
 
 #[test]
