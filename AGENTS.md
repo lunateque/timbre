@@ -68,7 +68,8 @@ whole workspace is kept honest by one command: `just ci`.
 
 - Work on a local branch; land with `just land <branch>`, which squashes the
   branch onto `main` as one commit, runs `just ci` first and checks the
-  message with `cargo xtask commits` afterwards.
+  message with `cargo xtask commits` afterwards. Without a terminal, pass the
+  message as a file: `just land <branch> <message-file>`.
 - Commit style (conventional types, subject capitalization, length, the imperative
   mood, no fixup/wip/merge commits) is checked by `committed` with the rules of
   `committed.toml`; `cargo xtask commits` runs it and adds the rest: a body is

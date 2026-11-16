@@ -23,13 +23,14 @@ setup:
     git config core.hooksPath .githooks
     cargo install --locked cargo-deny@0.20.2 cargo-machete@0.10.1 typos-cli@1.52.2 committed@1.1.12
 
-# Squash a local branch onto main as one polished commit.
-land branch:
+# Squash a local branch onto main as one polished commit; the message comes from the
+# editor, or from `message` (a file path) when landing without a terminal.
+land branch message="":
     git diff --quiet && git diff --cached --quiet
     git switch {{branch}}
     just ci
     git switch main
     git merge --squash {{branch}}
-    git commit
+    if [ -n "{{message}}" ]; then git commit -F "{{message}}"; else git commit; fi
     cargo xtask commits HEAD~1..HEAD
     git branch -D {{branch}}
