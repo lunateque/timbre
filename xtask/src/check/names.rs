@@ -1,10 +1,11 @@
-//! `names`: every log event and failure code is prefixed with its module id and is
-//! declared exactly once in the workspace.
+//! `names`: every log event, failure code, permission and scheme name is prefixed
+//! with its module id and is declared exactly once in the workspace.
 //!
 //! A declaration is the token sequence `LogEvent` `:` `:` `new` `(` `<Str>` (or the
-//! same with `FailureCode`). Declarations in `tests/` files and inside `#[cfg(test)]`
-//! items are ignored: test fixtures reuse names on purpose and live where a reader
-//! expects them, and uniqueness of the shipped names is what matters.
+//! same with `FailureCode`, `Permission` or `SchemeName`). Declarations in `tests/`
+//! files and inside `#[cfg(test)]` items are ignored: test fixtures reuse names on
+//! purpose and live where a reader expects them, and uniqueness of the shipped
+//! names is what matters.
 
 use super::metadata::Package;
 use super::{Source, Violation};
@@ -23,6 +24,8 @@ fn punct(token: &Token<'_>, text: &str) -> bool {
 enum Namespace {
     Event,
     Code,
+    Permission,
+    Scheme,
 }
 
 impl Namespace {
@@ -30,6 +33,20 @@ impl Namespace {
         match self {
             Namespace::Event => "log event",
             Namespace::Code => "failure code",
+            Namespace::Permission => "permission",
+            Namespace::Scheme => "scheme name",
+        }
+    }
+
+    /// The namespace a `<Type>::new("<literal>")` declaration belongs to, from
+    /// the type's name.
+    fn of_type(type_name: &str) -> Option<Self> {
+        match type_name {
+            "LogEvent" => Some(Self::Event),
+            "FailureCode" => Some(Self::Code),
+            "Permission" => Some(Self::Permission),
+            "SchemeName" => Some(Self::Scheme),
+            _ => None,
         }
     }
 }
@@ -42,7 +59,8 @@ struct Declaration<'a> {
 
 pub(crate) fn check(packages: &[Package], sources: &[Source<'_>]) -> Vec<Violation> {
     let mut violations = Vec::new();
-    // events and codes are separate namespaces, hence two lists.
+    // events, codes, permissions and scheme names are separate namespaces, so a
+    // duplicate is keyed by (name, namespace).
     let mut declared: Vec<(String, Namespace, String, usize)> = Vec::new();
     for file in sources {
         let skip = test_items(&file.tokens);
@@ -181,12 +199,9 @@ fn declarations<'a>(tokens: &[Token<'a>], skip: &[bool]) -> Vec<Declaration<'a>>
         let [first, second, third, fourth, fifth, sixth] = window else {
             continue;
         };
-        let namespace = if ident(first, "LogEvent") {
-            Namespace::Event
-        } else if ident(first, "FailureCode") {
-            Namespace::Code
-        } else {
-            continue;
+        let namespace = match Namespace::of_type(first.text) {
+            Some(namespace) if first.kind == Kind::Ident => namespace,
+            _ => continue,
         };
         if !punct(second, ":")
             || !punct(third, ":")
@@ -297,5 +312,75 @@ mod tests {
             "pub const E: LogEvent = LogEvent::new(\"timbre.log_filter_invalid\");\n",
         );
         assert!(check(&packages(), &[codes, events]).is_empty());
+    }
+
+    #[test]
+    fn one_name_may_live_in_three_namespaces_of_one_package() {
+        let file = source(
+            "crates/modules/hello/src/lib.rs",
+            "pub const C: FailureCode = FailureCode::new(\"hello.scan\");\n\
+             pub const P: Permission = Permission::new(\"hello.scan\");\n\
+             pub const S: SchemeName = SchemeName::new(\"hello.scan\");\n",
+        );
+        assert!(check(&packages(), &[file]).is_empty());
+    }
+
+    #[test]
+    fn a_permission_with_a_foreign_prefix_is_reported() {
+        let file = source(
+            "crates/modules/hello/src/lib.rs",
+            "pub const GREET: Permission = Permission::new(\"timbre.greet\");\n",
+        );
+        let violations = check(&packages(), &[file]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0]
+                .message
+                .contains("`timbre.greet` must start with `hello.`")
+        );
+    }
+
+    #[test]
+    fn a_scheme_with_a_foreign_prefix_is_reported() {
+        let file = source(
+            "crates/modules/hello/src/lib.rs",
+            "pub const KEY: SchemeName = SchemeName::new(\"kernel.key\");\n",
+        );
+        let violations = check(&packages(), &[file]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(violations[0].message.contains("must start with `hello.`"));
+    }
+
+    #[test]
+    fn the_same_permission_declared_twice_is_reported() {
+        let first = source(
+            "crates/modules/hello/src/lib.rs",
+            "pub const GREET: Permission = Permission::new(\"hello.greet\");\n",
+        );
+        let second = source(
+            "crates/modules/hello/src/other.rs",
+            "pub const HELLO_GREET: Permission = Permission::new(\"hello.greet\");\n",
+        );
+        let violations = check(&packages(), &[first, second]);
+        assert_eq!(violations.len(), 1, "{violations:?}");
+        assert!(
+            violations[0]
+                .message
+                .contains("permission `hello.greet` is already declared")
+        );
+    }
+
+    #[test]
+    fn correct_permissions_and_schemes_are_clean() {
+        let hello = source(
+            "crates/modules/hello/src/lib.rs",
+            "pub const GREET: Permission = Permission::new(\"hello.greet\");\n\
+             pub const KEY: SchemeName = SchemeName::new(\"hello.key\");\n",
+        );
+        let kernel = source(
+            "crates/kernel/src/credential/mod.rs",
+            "pub const SIG: SchemeName = SchemeName::new(\"kernel.sig\");\n",
+        );
+        assert!(check(&packages(), &[hello, kernel]).is_empty());
     }
 }

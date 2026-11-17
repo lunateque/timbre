@@ -226,6 +226,25 @@ mod tests {
     }
 
     #[test]
+    fn a_module_cannot_register_under_a_reserved_module_id() {
+        for reserved in ["kernel", "timbre"] {
+            let text = format!(
+                "registry.migration(\"{reserved}\", 1, \"CREATE TABLE {reserved}_track (id INTEGER)\")?;\n"
+            );
+            let file = source("crates/modules/hello/src/lib.rs", &text);
+            let violations = check(&packages(), &[file]);
+            assert_eq!(violations.len(), 1, "{reserved}: {violations:?}");
+            assert!(
+                violations[0]
+                    .message
+                    .contains(&format!("the migration names `{reserved}`")),
+                "{reserved}: {:?}",
+                violations[0].message
+            );
+        }
+    }
+
+    #[test]
     fn every_object_kind_and_quoting_is_checked() {
         let text = call(
             "CREATE VIRTUAL TABLE search USING fts5(a); \

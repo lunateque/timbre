@@ -45,8 +45,11 @@ whole workspace is kept honest by one command: `just ci`.
 - Errors are hand-written enums implementing `timbre_kernel::Failure` (a stable
   code, an HTTP status and a user-safe message), returned as `Fallible<T>` with
   an explicit `Box::new(...)`; there is no `From` conversion into the box.
-- `cargo xtask check` enforces that each code and each event name is declared
-  once in the workspace and that every declaration carries the module's prefix.
+- `cargo xtask check` enforces that each code, event name, permission and scheme
+  name is declared once in the workspace and that every declaration carries the
+  module's prefix: `kernel`, `timbre` and `xtask` belong to the kernel, the
+  binary and the tooling, so a module credential such as `timbre.sso` fails
+  the build.
 
 ## Code rules
 
