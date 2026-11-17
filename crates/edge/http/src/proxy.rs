@@ -91,6 +91,27 @@ impl From<Octets> for u128 {
     }
 }
 
+/// The raw `X-Forwarded-For` list of a request: every header line carrying
+/// the name, in wire order, joined by `, `.
+///
+/// RFC 7239 allows the list to arrive as several `X-Forwarded-For` lines as
+/// well as one comma-separated line; the semantics are the same list either
+/// way. Reading only the first line would drop every hop a chain of proxies
+/// appended after the first, so the rightmost-untrusted rule would fire on a
+/// header the client fully controls.
+#[must_use]
+pub(crate) fn forwarded_for(headers: &[(String, Vec<u8>)]) -> Option<String> {
+    let mut list = String::new();
+    for value in crate::adapter::header_values(headers, "x-forwarded-for") {
+        let text = String::from_utf8_lossy(value);
+        if !list.is_empty() {
+            list.push_str(", ");
+        }
+        list.push_str(text.trim_end_matches([' ', '\t']));
+    }
+    (!list.is_empty()).then_some(list)
+}
+
 /// The client address of a request: `peer` itself unless it is trusted and
 /// `forwarded` (the raw `X-Forwarded-For` header) names an untrusted hop.
 ///
@@ -181,5 +202,43 @@ mod tests {
             let error = Trusted::parse(bad).expect_err("malformed");
             assert_eq!(error.code(), crate::failures::PROXY_INVALID, "for {bad:?}");
         }
+    }
+
+    #[test]
+    fn every_xff_line_joins_into_one_list_in_wire_order() {
+        let headers = vec![
+            ("host".to_owned(), b"x".to_vec()),
+            ("x-forwarded-for".to_owned(), b"198.51.100.1".to_vec()),
+            ("content-type".to_owned(), b"text/plain".to_vec()),
+            (
+                "x-forwarded-for".to_owned(),
+                b"203.0.113.9, 10.0.0.1".to_vec(),
+            ),
+        ];
+        assert_eq!(
+            forwarded_for(&headers).as_deref(),
+            Some("198.51.100.1, 203.0.113.9, 10.0.0.1")
+        );
+        assert_eq!(forwarded_for(&[]), None);
+        assert_eq!(forwarded_for(&headers[..1]), None);
+    }
+
+    #[test]
+    fn a_second_xff_line_from_the_trusted_proxy_sets_the_client() {
+        // The trusted proxy appends the real client on its own line; reading
+        // only the first line (the client's forged one) would answer `9.9.9.9`.
+        let trusted = trust(&["10.0.0.1"]);
+        let peer = "10.0.0.1".parse().expect("an address");
+        let headers = vec![
+            ("x-forwarded-for".to_owned(), b"9.9.9.9".to_vec()),
+            ("x-forwarded-for".to_owned(), b"203.0.113.9".to_vec()),
+        ];
+        assert_eq!(
+            client_address(peer, forwarded_for(&headers).as_deref(), &trusted),
+            "203.0.113.9"
+                .parse::<std::net::IpAddr>()
+                .expect("an address"),
+            "the proxy's own appended hop wins over the forged first line"
+        );
     }
 }

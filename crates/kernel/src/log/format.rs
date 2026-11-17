@@ -48,7 +48,7 @@ fn json_value(out: &mut String, value: Value<'_>) {
         // JSON has no infinity or NaN; null keeps every line parseable.
         Value::Float(_) => out.push_str("null"),
         Value::Str(s) => push_escaped(out, s),
-        Value::Redacted => out.push_str("\"***\""),
+        Value::Redacted => push_escaped(out, crate::secret::REDACTED),
     }
 }
 
@@ -58,7 +58,7 @@ fn pretty_value(out: &mut String, value: Value<'_>) {
         Value::Int(i) => out.push_str(&i.to_string()),
         Value::Float(f) => out.push_str(&f.to_string()),
         Value::Str(s) => push_escaped(out, s),
-        Value::Redacted => out.push_str("***"),
+        Value::Redacted => out.push_str(crate::secret::REDACTED),
     }
 }
 

@@ -44,7 +44,7 @@ impl Ports {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::log::log_tests::{Shared, fixed};
+    use crate::testing::{Shared, fixed};
     use crate::{Ctx, Format, LogFilter, Logger, Registry};
     use std::sync::{Arc, Mutex};
 

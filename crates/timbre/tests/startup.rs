@@ -321,3 +321,80 @@ fn http_get(address: &str, path: &str) -> String {
         .expect("the response arrives");
     response
 }
+
+#[test]
+fn a_malformed_server_section_stops_startup() {
+    // `data_dir` must be a string; a number is not one, and the error must
+    // stop the process with `config.invalid`, never fall back to defaults.
+    let dir = temp_data_dir("bad-section");
+    let output = Command::new(env!("CARGO_BIN_EXE_timbre"))
+        .env("TIMBRE_LOG", "info")
+        .env("TIMBRE_SERVER__DATA_DIR", "2024")
+        .env("TIMBRE_CONFIG", dir.path().join("absent.toml").as_os_str())
+        .args(["db", "check"])
+        .current_dir(dir.path())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    assert_eq!(output.status.code(), Some(1), "a bad section fails startup");
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    let line = stdout
+        .lines()
+        .find(|line| line.contains(r#""event":"timbre.config_failed""#))
+        .unwrap_or_else(|| panic!("a timbre.config_failed line in: {stdout}"));
+    assert!(
+        line.contains(r#""code":"config.invalid""#),
+        "the code is config.invalid: {line}"
+    );
+    assert!(
+        !line.contains("2024"),
+        "the offending value is redacted: {line}"
+    );
+}
+
+#[test]
+fn a_config_flag_without_a_value_is_a_usage_error() {
+    let (lines, code) = run_with("info", &["--config"]);
+    assert_eq!(code, Some(2), "`--config` alone exits 2");
+    assert!(
+        lines
+            .iter()
+            .any(|line| line.contains(r#""event":"timbre.usage""#)
+                && line.contains("needs a path")),
+        "the usage error explains itself: {lines:?}"
+    );
+}
+
+#[test]
+fn a_non_unicode_argument_is_a_usage_error() {
+    // One raw argument the platform cannot spell as UTF-8/UTF-16 text:
+    // a 0xFF byte on Unix, an unpaired surrogate on Windows.
+    #[cfg(unix)]
+    let raw = {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(b"serve\xFF".to_vec())
+    };
+    #[cfg(windows)]
+    let raw = {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&[0xD800])
+    };
+    let output = Command::new(env!("CARGO_BIN_EXE_timbre"))
+        .env("TIMBRE_LOG", "info")
+        .arg(raw)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .output()
+        .expect("the binary runs");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "an undecodable argument exits 2"
+    );
+    let stdout = String::from_utf8(output.stdout).expect("stdout is utf-8");
+    assert!(
+        stdout.contains(r#""event":"timbre.usage""#) && stdout.contains("not valid unicode"),
+        "the usage error names the argument problem: {stdout}"
+    );
+}

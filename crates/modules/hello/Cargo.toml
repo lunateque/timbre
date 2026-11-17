@@ -11,3 +11,7 @@ workspace = true
 
 [dependencies]
 timbre-kernel.workspace = true
+
+[dev-dependencies]
+# Log assertions use the kernel's test support (sink, fixed clocks, helpers).
+timbre-kernel = { workspace = true, features = ["testing"] }

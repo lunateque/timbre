@@ -14,3 +14,5 @@ pub const JOB_FINISHED: LogEvent = LogEvent::new("kernel.job_finished");
 pub const JOB_FAILED: LogEvent = LogEvent::new("kernel.job_failed");
 /// A credential check was rejected; the secret itself is never logged.
 pub const AUTH_FAILED: LogEvent = LogEvent::new("kernel.auth_failed");
+/// The writer dropped log lines while the sink lagged; `count` says how many.
+pub const LOG_DROPPED: LogEvent = LogEvent::new("kernel.log_dropped");

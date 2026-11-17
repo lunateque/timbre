@@ -1,89 +1,12 @@
-//! Turning a hyper request into the kernel `Request`, and the kernel
-//! `Response` back into a hyper one.
+//! Turning a hyper request into the kernel `Request`: the method, the
+//! normalized path, the parsed query, the collected body.
 
-use http_body_util::{BodyExt, Empty, Full};
-use hyper::body::{Bytes, Frame, Incoming};
+use crate::failures::HttpFailure;
+use http_body_util::BodyExt;
+use hyper::body::Incoming;
 use percent_encoding::percent_decode_str;
 use timbre_kernel::Failure;
-use timbre_kernel::http::{Body, Method};
-
-/// The hyper body type the server sends: empty, in-memory, or streamed.
-pub(crate) enum Reply {
-    /// No body.
-    Empty(Empty<Bytes>),
-    /// A body held whole.
-    Full(Full<Bytes>),
-    /// A body produced chunk by chunk from a kernel `Chunks` stream; the
-    /// stream's errors close the body.
-    Streamed(Streamed),
-}
-
-/// The kernel `Chunks` stream seen as a hyper `Body`.
-pub(crate) struct Streamed {
-    inner: std::pin::Pin<Box<dyn timbre_kernel::http::Chunks + Send>>,
-}
-
-impl hyper::body::Body for Reply {
-    type Data = Bytes;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        // Reply is an enum of Unpin bodies; the boxes inside are Unpin too.
-        match std::pin::Pin::into_inner(self) {
-            Self::Empty(body) => std::pin::Pin::new(body)
-                .poll_frame(cx)
-                .map(|frame| frame.map(|each| each.map_err(Into::into))),
-            Self::Full(body) => std::pin::Pin::new(body)
-                .poll_frame(cx)
-                .map(|frame| frame.map(|each| each.map_err(Into::into))),
-            Self::Streamed(body) => std::pin::Pin::new(body).poll_frame(cx),
-        }
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        // The log's `bytes` field reads this; a stream stays unknown.
-        match self {
-            Self::Empty(body) => http_body::Body::size_hint(body),
-            Self::Full(body) => http_body::Body::size_hint(body),
-            Self::Streamed(_) => http_body::SizeHint::new(),
-        }
-    }
-}
-
-impl hyper::body::Body for Streamed {
-    type Data = Bytes;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
-
-    fn poll_frame(
-        self: std::pin::Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        let this = std::pin::Pin::into_inner(self);
-        match this.inner.as_mut().poll_chunk(cx) {
-            std::task::Poll::Pending => std::task::Poll::Pending,
-            std::task::Poll::Ready(None) => std::task::Poll::Ready(None),
-            std::task::Poll::Ready(Some(Ok(chunk))) => {
-                std::task::Poll::Ready(Some(Ok(Frame::data(Bytes::from(chunk)))))
-            }
-            std::task::Poll::Ready(Some(Err(failure))) => {
-                std::task::Poll::Ready(Some(Err(format!("{failure:?}").into())))
-            }
-        }
-    }
-}
-
-impl From<Body> for Reply {
-    fn from(body: Body) -> Self {
-        match body {
-            Body::Empty => Reply::Empty(Empty::new()),
-            Body::Bytes(bytes) => Reply::Full(Full::new(Bytes::from(bytes))),
-            Body::Stream(chunks) => Reply::Streamed(Streamed { inner: chunks }),
-        }
-    }
-}
+use timbre_kernel::http::Method;
 
 /// The method behind `text`, or `None` for methods the kernel has no shape
 /// for (they are answered 405 before routing).
@@ -101,12 +24,17 @@ pub(crate) fn to_method(text: &str) -> Option<Method> {
     })
 }
 
-/// The decoded path and the parsed query of a request-target.
+/// The decoded, dot-normalized path and the parsed query of a request-target.
+///
+/// The path is normalized per RFC 3986 `remove_dot_segments` and empty
+/// segments are collapsed, so routing sees one spelling per resource
+/// (`/a//b/../c`, `/a/c` and `/a/b/./../c` all arrive as `/a/c`). A path
+/// whose `..` climb goes above the root is refused: it names no resource.
 ///
 /// # Errors
 ///
-/// `400` when the path holds a broken percent-escape or does not decode to
-/// UTF-8.
+/// `400` when the path holds a broken percent-escape, does not decode to
+/// UTF-8, does not start with `/`, or climbs above the root.
 pub(crate) fn path_and_query(target: &str) -> Result<(String, Vec<(String, String)>), u16> {
     let (raw_path, raw_query) = match target.split_once('?') {
         Some((path, query)) => (path, Some(query)),
@@ -118,12 +46,47 @@ pub(crate) fn path_and_query(target: &str) -> Result<(String, Vec<(String, Strin
     if decoded.contains('\0') || !decoded.starts_with('/') {
         return Err(400);
     }
+    let path = normalize_path(&decoded).ok_or(400u16)?;
     let query = raw_query.map_or_else(Vec::new, |raw| {
         form_urlencoded::parse(raw.as_bytes())
             .into_owned()
             .collect::<Vec<(String, String)>>()
     });
-    Ok((decoded.into_owned(), query))
+    Ok((path, query))
+}
+
+/// RFC 3986 `remove_dot_segments` with empty interior segments collapsed:
+/// `.` and `..` are whole segments only, never parts of a name (`a.b` and
+/// `...` stay as they are). `None` when the climb leaves the root.
+fn normalize_path(path: &str) -> Option<String> {
+    let mut kept: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                kept.pop()?;
+            }
+            other => kept.push(other),
+        }
+    }
+    let mut out = String::with_capacity(path.len());
+    for segment in kept {
+        out.push('/');
+        out.push_str(segment);
+    }
+    if out.is_empty() {
+        out.push('/');
+    }
+    Some(out)
+}
+
+/// Whether a route's `{name}` capture can be handed to a handler. After
+/// normalization a segment is never `.` or `..` (the normalization consumes
+/// those), but the capture check keeps that guarantee local to this crate
+/// instead of depending on the call order in `serve`.
+#[must_use]
+pub(crate) fn param_usable(param: &str) -> bool {
+    param != "." && param != ".."
 }
 
 /// Whether this is a form POST whose body must be merged into the query.
@@ -152,65 +115,6 @@ pub(crate) fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
         .collect::<Vec<(String, String)>>()
 }
 
-/// Query and form keys whose values are credentials: the logger never shows
-/// them. The list is wire spellings, matched case-insensitively: `apiKey`,
-/// Subsonic's `p`/`t`/`s`, and the OAuth words.
-pub(crate) const SECRET_QUERY_KEYS: &[&str] = &["apikey", "p", "t", "s", "token", "password"];
-
-/// The header names whose values must never reach a log line: the edge logs
-/// no header value at all, and every future logger honors this list.
-pub const SECRET_HEADER_NAMES: &[&str] = &["authorization", "cookie", "proxy-authorization"];
-
-/// Whether `name` (already lowercased) names a header whose value stays out of
-/// the log.
-#[must_use]
-pub fn is_secret_header(name: &str) -> bool {
-    SECRET_HEADER_NAMES.contains(&name)
-}
-
-/// Whether `key` names a secret query or form value.
-#[must_use]
-pub(crate) fn is_secret_key(key: &str) -> bool {
-    SECRET_QUERY_KEYS
-        .iter()
-        .any(|secret| key.eq_ignore_ascii_case(secret))
-}
-
-/// The query as it may be logged: secret keys keep their name, their value
-/// becomes `***`, order and the rest stay as they arrived.
-#[must_use]
-pub(crate) fn redacted_query(pairs: &[(String, String)]) -> String {
-    let mut text = String::new();
-    for (key, value) in pairs {
-        if !text.is_empty() {
-            text.push('&');
-        }
-        text.push_str(key);
-        text.push('=');
-        text.push_str(if is_secret_key(key) { "***" } else { value });
-    }
-    text
-}
-
-/// The path and query as they may be logged: the query part, if any, is
-/// decoded and its secret values redacted.
-#[must_use]
-pub(crate) fn redacted_target(target: &str) -> String {
-    let Some((path, query)) = target.split_once('?') else {
-        return target.to_owned();
-    };
-    format!("{path}?{}", redacted_query(&form_pairs(query.as_bytes())))
-}
-
-/// The value of one header, as text, from the kernel-shaped list.
-#[must_use]
-pub(crate) fn header_value(headers: &[(String, Vec<u8>)], name: &str) -> Option<String> {
-    headers
-        .iter()
-        .find(|(stored, _)| stored == name)
-        .map(|(_, value)| String::from_utf8_lossy(value).into_owned())
-}
-
 /// The value of one header as raw bytes, from the kernel-shaped list.
 #[must_use]
 pub(crate) fn header_bytes(headers: &[(String, Vec<u8>)], name: &str) -> Option<Vec<u8>> {
@@ -220,18 +124,30 @@ pub(crate) fn header_bytes(headers: &[(String, Vec<u8>)], name: &str) -> Option<
         .map(|(_, value)| value.clone())
 }
 
+/// Every value of header `name`, in wire order, from the kernel-shaped list.
+pub(crate) fn header_values<'a>(
+    headers: &'a [(String, Vec<u8>)],
+    name: &str,
+) -> impl Iterator<Item = &'a [u8]> {
+    headers
+        .iter()
+        .filter(move |(stored, _)| stored == name)
+        .map(|(_, value)| value.as_slice())
+}
+
 /// Read the request body whole, refusing more than `limit` bytes.
 ///
 /// # Errors
 ///
-/// `413` when the body exceeds the limit, `400` when the stream fails.
-pub(crate) async fn collect_body(mut incoming: Incoming, limit: usize) -> Result<Vec<u8>, u16> {
+/// `Refused::TooLarge` (413) when the body exceeds the limit,
+/// `http.body_failed` when the stream itself fails.
+pub(crate) async fn collect_body(mut incoming: Incoming, limit: usize) -> Result<Vec<u8>, Refused> {
     let mut collected: Vec<u8> = Vec::new();
     loop {
         let Some(result) = incoming.frame().await else {
             return Ok(collected);
         };
-        let frame = result.map_err(|_| 400u16)?;
+        let frame = result.map_err(|_| Refused::Failure(HttpFailure::BodyFailed))?;
         // Only data frames carry body bytes; trailers cannot overflow the cap
         // meaningfully and are accepted and dropped like hyper does for now.
         let Ok(data) = frame.into_data() else {
@@ -239,39 +155,71 @@ pub(crate) async fn collect_body(mut incoming: Incoming, limit: usize) -> Result
         };
         let room = limit.saturating_sub(collected.len());
         if data.len() > room {
-            return Err(413);
+            return Err(Refused::TooLarge);
         }
         collected.extend_from_slice(data.as_ref());
     }
 }
 
+/// Why a request body was refused before the handler ran.
+pub(crate) enum Refused {
+    /// The body stream failed or stalled; the failure carries the status and
+    /// the public message to answer with.
+    Failure(HttpFailure),
+    /// The body crossed `max_body_bytes`: 413, answered with an empty body.
+    TooLarge,
+}
+
+impl Refused {
+    /// The status the client is answered.
+    pub(crate) fn status(&self) -> u16 {
+        match self {
+            Self::Failure(failure) => failure.status(),
+            Self::TooLarge => 413,
+        }
+    }
+
+    /// The body of the answer, `None` when it stays empty.
+    pub(crate) fn message(&self) -> Option<&str> {
+        match self {
+            Self::Failure(failure) => Some(failure.public_message()),
+            Self::TooLarge => None,
+        }
+    }
+}
+
 /// Read the request body with one deadline over the whole read: a client
 /// that sends headers and then stalls mid-body would otherwise hold the
-/// connection slot forever. An expiry logs `http.body_timeout` on its own
-/// before answering.
-///
-/// The `Err` is the status to answer: 408 past the deadline, 413 over the
-/// byte cap, 400 for a body stream that failed.
+/// connection slot forever. Every refusal logs its own event with the
+/// failure's code before being returned.
 pub(crate) async fn read_body(
     request_ctx: &timbre_kernel::Ctx,
     incoming: Incoming,
     limit: usize,
     timeout: std::time::Duration,
-) -> Result<Vec<u8>, u16> {
+) -> Result<Vec<u8>, Refused> {
     match tokio::time::timeout(timeout, collect_body(incoming, limit)).await {
-        Err(_) => {
-            let failure = crate::failures::HttpFailure::BodyTimeout;
-            timbre_kernel::log!(
-                request_ctx,
-                warn,
-                crate::log_events::BODY_TIMEOUT,
-                code = failure.code().as_str()
-            );
-            Err(failure.status())
-        }
+        Err(_) => Err(refuse(
+            request_ctx,
+            HttpFailure::BodyTimeout,
+            crate::log_events::BODY_TIMEOUT,
+        )),
         Ok(Ok(body)) => Ok(body),
-        Ok(Err(status)) => Err(status),
+        Ok(Err(refused @ Refused::TooLarge)) => Err(refused),
+        Ok(Err(Refused::Failure(failure))) => {
+            Err(refuse(request_ctx, failure, crate::log_events::BODY_FAILED))
+        }
     }
+}
+
+/// One warn line naming the failure's code, then the refusal to answer with.
+fn refuse(
+    request_ctx: &timbre_kernel::Ctx,
+    failure: HttpFailure,
+    event: timbre_kernel::LogEvent,
+) -> Refused {
+    timbre_kernel::log!(request_ctx, warn, event, code = failure.code().as_str());
+    Refused::Failure(failure)
 }
 
 #[cfg(test)]
@@ -306,24 +254,72 @@ mod tests {
     }
 
     #[test]
+    fn dot_segments_normalize_and_empty_segments_collapse() {
+        for (target, wanted) in [
+            ("/a/./b", "/a/b"),
+            ("/a/b/..", "/a"),
+            ("/a/b/../c", "/a/c"),
+            ("/a//b", "/a/b"),
+            ("/.//a", "/a"),
+            ("/.", "/"),
+            ("/a/b/./../c", "/a/c"),
+            // `...` and dotted names are not dot segments; a decoded `..`
+            // pops like a raw one.
+            ("/a/.../../b", "/a/b"),
+            ("/a.b/c..", "/a.b/c.."),
+            // A decoded `..` inside a longer name is ordinary text.
+            ("/a/b%2e%2e/c", "/a/b../c"),
+            ("/a/%2e%2e/c", "/c"),
+        ] {
+            let (path, _) = path_and_query(target).unwrap_or_else(|_| panic!("{target} is valid"));
+            assert_eq!(path, wanted, "{target} normalizes");
+        }
+    }
+
+    #[test]
+    fn a_path_climbing_above_the_root_is_400() {
+        for target in [
+            "/..",
+            "/../x",
+            "/a/../..",
+            "/a/../../..",
+            "/a/../../b",
+            "/%2E%2E/%2E%2E",
+            "/x/%2E%2E/..",
+        ] {
+            assert_eq!(
+                path_and_query(target).err(),
+                Some(400),
+                "{target} climbs out"
+            );
+        }
+    }
+
+    #[test]
+    fn a_capture_is_never_a_dot_segment() {
+        assert!(param_usable("album-42"));
+        assert!(param_usable("a.b"));
+        assert!(!param_usable("."));
+        assert!(!param_usable(".."));
+        // Normalization consumed every dot segment before routing: a path
+        // that ends in `.` routes as its parent.
+        assert_eq!(
+            path_and_query("/rest/.").expect("dots normalize").0,
+            "/rest"
+        );
+        assert_eq!(
+            path_and_query("/rest/..").expect("dots normalize").0,
+            "/",
+            "`..` empties the stack; that is not a climb above the root"
+        );
+    }
+
+    #[test]
     fn form_pairs_keep_order_and_decode() {
         let body = b"q=%D0%BF%D0%BE%D0%B8%C1%81k&n=1&q=two";
         let pairs = form_pairs(body);
         assert_eq!(pairs.len(), 3, "repeated keys survive");
         assert_eq!(pairs[2], ("q".to_owned(), "two".to_owned()));
-    }
-
-    #[test]
-    fn secret_query_keys_redact_and_others_pass_through() {
-        let pairs = form_pairs(b"u=anna&p=secret&apiKey=3f&t=deadbeef&s=cafe&x=1");
-        assert_eq!(
-            redacted_query(&pairs),
-            "u=anna&p=***&apiKey=***&t=***&s=***&x=1"
-        );
-        assert!(is_secret_header("authorization"));
-        assert!(is_secret_header("cookie"));
-        assert!(is_secret_header("proxy-authorization"));
-        assert!(!is_secret_header("content-type"));
     }
 
     #[test]
@@ -342,5 +338,20 @@ mod tests {
         ));
         assert!(!is_form_post("POST", Some(b"application/json")));
         assert!(!is_form_post("POST", None));
+    }
+
+    #[test]
+    fn every_header_value_of_a_name_arrives_in_wire_order() {
+        let headers = vec![
+            ("host".to_owned(), b"x".to_vec()),
+            ("x-forwarded-for".to_owned(), b"1.1.1.1".to_vec()),
+            ("x-forwarded-for".to_owned(), b"2.2.2.2".to_vec()),
+        ];
+        let joined = header_values(&headers, "x-forwarded-for")
+            .map(|value| String::from_utf8_lossy(value).into_owned())
+            .collect::<Vec<String>>()
+            .join(", ");
+        assert_eq!(joined, "1.1.1.1, 2.2.2.2");
+        assert_eq!(header_values(&headers, "missing").count(), 0);
     }
 }

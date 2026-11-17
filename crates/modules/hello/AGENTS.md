@@ -4,7 +4,8 @@
 
 An example module that exists to exercise the kernel contracts end to end:
 registration, a `Started` handler and a logged event, a route, a CLI command
-and a declared permission.
+and a declared permission. Its tests assert on log output through
+`timbre_kernel::testing` (dev-dependency feature), not a private sink copy.
 
 ## Ports
 

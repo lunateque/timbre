@@ -23,14 +23,19 @@ setup:
     git config core.hooksPath .githooks
     cargo install --locked cargo-deny@0.20.2 cargo-machete@0.10.1 typos-cli@1.52.2 committed@1.1.12
 
-# Squash a local branch onto main as one polished commit; the message comes from the
-# editor, or from `message` (a file path) when landing without a terminal.
-land branch message="":
+# Squash a local branch onto main as one commit; validates arguments before any git command.
+land branch message="": (_land-check branch message)
     git diff --quiet && git diff --cached --quiet
-    git switch {{branch}}
+    BRANCH={{quote(branch)}} sh -c 'git switch "$BRANCH"'
     just ci
     git switch main
-    git merge --squash {{branch}}
-    if [ -n "{{message}}" ]; then git commit -F "{{message}}"; else git commit; fi
+    BRANCH={{quote(branch)}} sh -c 'git merge --squash "$BRANCH"'
+    MESSAGE={{quote(message)}} sh -c 'if [ -n "$MESSAGE" ]; then git commit -F "$MESSAGE"; else git commit; fi'
     cargo xtask commits HEAD~1..HEAD
-    git branch -D {{branch}}
+    BRANCH={{quote(branch)}} sh -c 'git branch -D "$BRANCH"'
+
+# Refuse anything that is not a plain branch name or an existing message file.
+[private]
+_land-check branch message="":
+    BRANCH={{quote(branch)}} sh -c 'case "$BRANCH" in ""|-*|*[!A-Za-z0-9._/-]*) echo "land: invalid branch name: $BRANCH" >&2; exit 1;; esac; git check-ref-format --branch "$BRANCH" >/dev/null'
+    MESSAGE={{quote(message)}} sh -c 'if [ -n "$MESSAGE" ] && [ ! -f "$MESSAGE" ]; then echo "land: message is not a file: $MESSAGE" >&2; exit 1; fi'

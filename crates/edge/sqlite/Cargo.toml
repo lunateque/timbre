@@ -10,5 +10,5 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-rusqlite = { workspace = true, features = ["bundled", "backup"] }
+rusqlite = { workspace = true, features = ["bundled", "backup", "hooks", "trace"] }
 timbre-kernel.workspace = true

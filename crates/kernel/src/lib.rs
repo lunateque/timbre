@@ -5,8 +5,8 @@
 //! - [`Registry`]: the registration surface a module declares routes, jobs,
 //!   commands, permissions, credential providers, migrations, signal handlers
 //!   and port implementations on, finished into the shared [`Kernel`];
-//! - [`Signal`] and [`Bus`]: facts one module publishes to any number of
-//!   listeners, delivered synchronously in registration order;
+//! - [`Signal`]: facts one module publishes to any number of listeners,
+//!   delivered synchronously in registration order over the kernel's bus;
 //! - [`Port`] and [`Ports`]: interfaces one module provides and others
 //!   consume, where consumers must tolerate the provider being absent;
 //! - [`Logger`] and [`log!`]: structured logging with compile-time-checked
@@ -45,14 +45,16 @@ pub mod http;
 pub mod log_events;
 pub mod signals;
 
-pub use bus::{Bus, Handler, Signal};
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
+pub use bus::{Handler, Signal};
 pub use command::{Command, CommandHandler};
 pub use credential::{
     AuthOutcome, Credential, CredentialKind, CredentialProvider, RejectReason, Throttle, Verdict,
 };
 pub use ctx::{Ctx, RequestId};
 pub use failure::{Failure, FailureCode, Fallible};
-pub use failures::KernelFailure;
 pub use future::{BoxFuture, block_on};
 pub use identity::{Permission, PermissionEntry, Principal, UserId};
 pub use jobs::JobHandler;
@@ -63,7 +65,7 @@ pub use port::{Port, Ports};
 pub use registry::{Kernel, Registry};
 pub use route::{RouteHandler, RouteMatch};
 pub use runtime::{Runtime, ThreadRuntime};
-pub use secret::Secret;
+pub use secret::{REDACTED, Secret};
 
 #[cfg(test)]
 mod tests {

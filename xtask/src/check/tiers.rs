@@ -1,8 +1,10 @@
 //! `tiers`: external crates live at the edge or in xtask, each listed in `deps.allow`.
 //!
-//! `deps.allow` is the ledger of every third-party crate in the tree: one crate per
-//! line, followed by the reason it is allowed. A crate nobody uses anymore must leave
-//! the ledger, so the file cannot quietly rot.
+//! `deps.allow` is the ledger of every third-party crate in the tree: one line per
+//! DIRECT external dependency of a workspace package, followed by the reason it is
+//! allowed. Transitive dependencies ride along with their direct parents and are not
+//! listed. A crate nobody uses anymore must leave the ledger, so the file cannot
+//! quietly rot.
 
 use super::Violation;
 use super::metadata::{Package, PackageKind};

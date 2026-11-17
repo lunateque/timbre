@@ -1,9 +1,9 @@
 use super::*;
 use crate::failures::CREDENTIAL_KIND_TAKEN;
 use crate::identity::UserId;
-use crate::log::log_tests::{Shared, fixed};
 use crate::log_events::AUTH_FAILED;
 use crate::signals::AuthFailed;
+use crate::testing::{Shared, fixed};
 use crate::{Ctx, Format, Kernel, LogFilter, Logger, Registry, ThreadRuntime, block_on};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -160,6 +160,7 @@ fn a_recognized_credential_reaches_the_principal_and_stays_quiet() {
     assert_eq!(outcome, AuthOutcome::Recognized(principal()));
     assert_eq!(harness.asked_count(), 1, "the owner was asked");
     assert!(harness.journal.entries().is_empty(), "no signal on success");
+    harness.kernel.logger().flush();
     assert_eq!(harness.sink.text(), "");
 }
 
@@ -219,6 +220,7 @@ fn a_rejection_publishes_its_detail_and_never_the_secret() {
         ["127.0.0.1|tester|invalid"],
         "the handler saw client, user and reason"
     );
+    harness.kernel.logger().flush();
     let line = harness.sink.text();
     assert!(
         line.contains(&format!("\"event\":\"{}\"", AUTH_FAILED.as_str())),

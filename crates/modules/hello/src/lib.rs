@@ -11,7 +11,8 @@ use timbre_kernel::http::{Body, Method, Request, Response};
 use timbre_kernel::signals::Started;
 use timbre_kernel::{BoxFuture, Ctx, Fallible, Permission, Registry, log};
 
-/// The permission `hello` checks before greeting through its command.
+/// The permission `hello` declares for granting; the check that enforces it
+/// lands with route guards.
 pub const GREET: Permission = Permission::new("hello.greet");
 
 /// Register the module: one handler for `Started`, a route, a command and a
@@ -64,47 +65,15 @@ fn run_command(ctx: Ctx, _: Vec<String>) -> BoxFuture<Fallible> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
+    use timbre_kernel::testing::{Shared, epoch};
     use timbre_kernel::{Format, Kernel, LogFilter, Logger, RouteMatch, ThreadRuntime, block_on};
-
-    #[derive(Clone, Default)]
-    struct Shared(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Shared {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            // Lock errors mean another test panicked while writing; recovering
-            // keeps this test's own assertion the one that matters.
-            let mut guard = self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            guard.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Shared {
-        fn text(&self) -> String {
-            let guard = self
-                .0
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            String::from_utf8(guard.clone()).expect("logs are utf-8")
-        }
-    }
 
     fn finished(sink: Shared) -> Arc<Kernel> {
         let registry = Registry::new().module(register).expect("hello registers");
         registry.finish(
-            Logger::new(LogFilter::default(), Format::Json, Box::new(sink), || {
-                std::time::SystemTime::UNIX_EPOCH
-            }),
+            Logger::new(LogFilter::default(), Format::Json, Box::new(sink), epoch),
             Arc::new(ThreadRuntime::new()),
         )
     }
@@ -114,6 +83,8 @@ mod tests {
         let sink = Shared::default();
         let kernel = finished(sink.clone());
         Ctx::root(&kernel).publish(&Started);
+        // Dropping the last kernel joins the log writer, so every line has reached the sink.
+        drop(kernel);
         assert_eq!(
             sink.text(),
             "{\"ts\":\"1970-01-01T00:00:00.000Z\",\"level\":\"info\",\"event\":\"hello.greeted\",\"greeting\":\"hello\"}\n"
@@ -173,6 +144,7 @@ mod tests {
             .expect("the hello command is registered");
         assert!(rest.is_empty(), "no words follow the command name");
         block_on(handler(ctx, rest)).expect("the command succeeds");
+        drop(kernel);
         assert_eq!(
             sink.text(),
             "{\"ts\":\"1970-01-01T00:00:00.000Z\",\"level\":\"info\",\"event\":\"hello.greeted\",\"greeting\":\"hello\"}\n"

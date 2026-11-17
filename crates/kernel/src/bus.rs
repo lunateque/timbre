@@ -14,8 +14,10 @@ pub trait Signal: Send + Sync + 'static {}
 pub type Handler<S> = fn(&Ctx, &S) -> Fallible;
 
 /// Delivers signals to handlers in registration order; owned by the kernel.
+/// Not part of the module-facing contract: modules reach signals through
+/// `Registry::on` and `Ctx::publish`.
 #[derive(Default)]
-pub struct Bus {
+pub(crate) struct Bus {
     // Each entry is a `Vec<Handler<S>>` for the `S` matching the key; the type
     // id guarantees the downcast always succeeds.
     handlers: HashMap<TypeId, Box<dyn Any + Send + Sync>>,
@@ -59,8 +61,8 @@ impl Bus {
 mod tests {
     use super::*;
     use crate::failures::KernelFailure;
-    use crate::log::log_tests::{Shared, fixed};
     use crate::port::tests::{Recorder, RecorderImpl};
+    use crate::testing::{Shared, fixed};
     use crate::{Ctx, Format, LogFilter, Logger, Registry, ThreadRuntime};
     use std::sync::Arc;
 
@@ -105,6 +107,7 @@ mod tests {
             Arc::new(ThreadRuntime::new()),
         );
         Ctx::root(&kernel).publish(&Ping);
+        kernel.logger().flush();
         assert_eq!(RecorderImpl::entries(&recorder), ["first", "second"]);
         let text = sink.text();
         let lines: Vec<&str> = text.lines().collect();
@@ -135,6 +138,7 @@ mod tests {
             Arc::new(ThreadRuntime::new()),
         );
         Ctx::root(&kernel).publish(&Quiet);
+        kernel.logger().flush();
         assert_eq!(sink.text(), "");
     }
 }

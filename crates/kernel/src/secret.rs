@@ -1,5 +1,9 @@
 //! A wrapper that keeps a value out of every accidental rendering.
 
+/// The single mask every redaction writes, so logs, edge output and `Debug`
+/// dumps hide values the same way.
+pub const REDACTED: &str = "***";
+
 /// Wraps tokens, passwords and keys so `Debug`, `Display` and logging print `***`.
 /// No `PartialEq`: comparing secrets wants constant-time equality, which this
 /// type must not pretend to offer.
@@ -25,13 +29,13 @@ impl<T> Secret<T> {
 
 impl<T> std::fmt::Debug for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("***")
+        f.write_str(REDACTED)
     }
 }
 
 impl<T> std::fmt::Display for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("***")
+        f.write_str(REDACTED)
     }
 }
 

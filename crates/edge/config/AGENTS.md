@@ -20,4 +20,10 @@ None.
 
 - `config.invalid` (`ConfigFailure::Invalid`): the config file exists but
   cannot be read, parsed or deserialized into the requested section, or an
-  environment override value cannot be applied.
+  environment override value cannot be applied. The reason names the file,
+  line, section and key but never the offending value itself (`<value>`):
+  config values can be secrets and the reason reaches the log. Every serde
+  value shape is hidden — typed values (``integer `…` ``, ``string "…"``),
+  an unrecognized enum spelling (``unknown variant `…` ``) and a value a
+  field's own validation rejected (``invalid value: `…` ``) — while the
+  expected-variant list and the key context stay readable.

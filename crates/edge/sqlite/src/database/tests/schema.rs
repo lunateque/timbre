@@ -1,57 +1,4 @@
 use super::*;
-use rusqlite::OptionalExtension;
-use std::sync::atomic::{AtomicU32, Ordering};
-use timbre_kernel::{Fallible, Migration};
-
-static COUNTER: AtomicU32 = AtomicU32::new(0);
-
-fn scratch(tag: &str) -> std::path::PathBuf {
-    let path = std::env::temp_dir().join(format!(
-        "timbre-sqlite-test-{}-{tag}-{}",
-        std::process::id(),
-        COUNTER.fetch_add(1, Ordering::SeqCst)
-    ));
-    std::fs::create_dir_all(&path).expect("the scratch directory exists");
-    path.join("timbre.db")
-}
-
-// `Migration` is built by `Registry::migration`; this mirrors what the
-// binary hands to `migrate`.
-fn migrations(entries: &[(&'static str, u32, &'static str)]) -> Vec<Migration> {
-    let mut registry = timbre_kernel::Registry::new();
-    for (module, version, sql) in entries {
-        registry
-            .migration(module, *version, sql)
-            .expect("the test migrations register");
-    }
-    let kernel = registry.finish(
-        timbre_kernel::Logger::stdout(timbre_kernel::LogFilter::default()),
-        std::sync::Arc::new(timbre_kernel::ThreadRuntime::new()),
-    );
-    kernel.migrations().to_vec()
-}
-
-fn table_exists(database: &Database, name: &str) -> bool {
-    database
-        .read(|connection| {
-            let found: Option<String> = connection
-                .query_row(
-                    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?1",
-                    [name],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(crate::failures::query_error)?;
-            Ok(found.is_some())
-        })
-        .expect("the read runs")
-}
-
-fn batch(connection: &rusqlite::Connection, sql: &str) -> Fallible {
-    connection
-        .execute_batch(sql)
-        .map_err(crate::failures::query_error)
-}
 
 #[test]
 fn migrations_apply_once_and_a_second_run_changes_nothing() {
@@ -62,7 +9,9 @@ fn migrations_apply_once_and_a_second_run_changes_nothing() {
         1,
         "CREATE TABLE demo_rows (id INTEGER PRIMARY KEY); INSERT INTO demo_rows (id) VALUES (1)",
     )]);
-    database.migrate(&steps).expect("the first run applies");
+    database
+        .migrate(&quiet_ctx(), &steps)
+        .expect("the first run applies");
     let count = |database: &Database| -> i64 {
         database
             .read(|connection| {
@@ -77,7 +26,9 @@ fn migrations_apply_once_and_a_second_run_changes_nothing() {
     // Re-opening and re-migrating must not re-run the step nor fail.
     drop(database);
     let reopened = Database::open(&path).expect("the database reopens");
-    reopened.migrate(&steps).expect("a second run is a no-op");
+    reopened
+        .migrate(&quiet_ctx(), &steps)
+        .expect("a second run is a no-op");
     assert_eq!(count(&reopened), 1, "the step did not run twice");
     let _ = std::fs::remove_dir_all(path.parent().expect("the scratch dir"));
 }
@@ -103,8 +54,10 @@ fn a_failing_migration_rolls_back_its_own_module_and_keeps_the_others() {
             "INSERT INTO breaker_rows (id) VALUES (1); CREATE TABLE breaker_bad (id INTEGER) REFERENCES nowhere_here (x)",
         ),
     ]);
-    let error = database.migrate(&steps).expect_err("the step fails");
-    assert_eq!(error.code(), crate::MIGRATION_FAILED);
+    let error = database
+        .migrate(&quiet_ctx(), &steps)
+        .expect_err("the step fails");
+    assert_eq!(error.code(), crate::failures::MIGRATION_FAILED);
     assert!(
         table_exists(&database, "keeper_rows"),
         "the other module landed"
@@ -119,7 +72,9 @@ fn a_failing_migration_rolls_back_its_own_module_and_keeps_the_others() {
         1,
         "CREATE TABLE breaker_rows (id INTEGER PRIMARY KEY)",
     )]);
-    database.migrate(&fixed).expect("a fixed rerun applies");
+    database
+        .migrate(&quiet_ctx(), &fixed)
+        .expect("a fixed rerun applies");
     assert!(table_exists(&database, "breaker_rows"));
     let _ = std::fs::remove_dir_all(path.parent().expect("the scratch dir"));
 }
@@ -162,29 +117,42 @@ fn prune_lists_only_tables_no_registered_module_owns() {
 }
 
 #[test]
-fn a_backup_is_an_independent_working_database() {
-    let path = scratch("backup");
+fn a_module_name_with_an_underscore_owns_its_tables_by_longest_prefix() {
+    let path = scratch("prune-prefix");
     let database = Database::open(&path).expect("a fresh database opens");
-    let target = path.parent().expect("the scratch dir").join("backup.db");
     database
         .write(|connection| {
             batch(
                 connection,
-                "CREATE TABLE demo_rows (id INTEGER PRIMARY KEY); INSERT INTO demo_rows (id) VALUES (7)",
+                "CREATE TABLE stream_rows (id INTEGER PRIMARY KEY);
+                 CREATE TABLE stream_v2_rows (id INTEGER PRIMARY KEY);
+                 CREATE TABLE orphan_rows (id INTEGER PRIMARY KEY)",
             )
         })
-        .expect("the row lands");
-    database.backup(&target).expect("the backup runs");
-    drop(database);
-    let copy = Database::open(&target).expect("the copy opens");
-    copy.check().expect("the copy passes integrity");
-    let value: i64 = copy
-        .read(|connection| {
-            connection
-                .query_row("SELECT id FROM demo_rows", [], |row| row.get(0))
-                .map_err(crate::failures::query_error)
-        })
-        .expect("the copy reads");
-    assert_eq!(value, 7, "the backup carries the data");
+        .expect("the tables exist");
+    // `stream_v2_rows` starts with the `stream_` prefix of another registered
+    // module, but the longest matching prefix wins: both modules own their
+    // tables, and `orphan_rows` matches no module at all.
+    let unowned = database
+        .owned_tables(&["stream", "stream_v2"])
+        .expect("the catalog reads");
+    assert!(
+        !unowned.contains(&"stream_rows".to_owned())
+            && !unowned.contains(&"stream_v2_rows".to_owned()),
+        "both modules own their tables: {unowned:?}"
+    );
+    assert!(
+        unowned.contains(&"orphan_rows".to_owned()),
+        "a table no module's `<module>_` prefix matches is a candidate: {unowned:?}"
+    );
+    // With only `stream_v2` registered, the old first-segment rule would
+    // hand `stream_v2_rows` to the unregistered `stream` and prune it.
+    let unowned = database
+        .owned_tables(&["stream_v2"])
+        .expect("the catalog reads");
+    assert!(
+        !unowned.contains(&"stream_v2_rows".to_owned()),
+        "a longer module name still owns its table: {unowned:?}"
+    );
     let _ = std::fs::remove_dir_all(path.parent().expect("the scratch dir"));
 }

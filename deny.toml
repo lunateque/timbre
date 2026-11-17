@@ -1,6 +1,7 @@
 # Checked by the pinned cargo-deny version; keep the schema current.
-# In phase 0 the only external crates are the two xtask depends on; the
-# allow list below covers their full trees.
+# deps.allow lists the direct external dependencies, each with the reason it is allowed.
+# Transitive crates are not listed there: this file gates every crate in the tree by
+# licenses, bans, sources and advisories.
 
 [graph]
 all-features = true

@@ -121,8 +121,10 @@ impl Drop for FillOnDrop {
     }
 }
 
-/// The std runtime: every task gets its own thread, so CLI commands and tests
-/// need no executor crate. A long-lived server wires a real runtime instead.
+/// The std runtime: every task gets its own thread, so CLI commands and tests need no
+/// executor crate. Each `spawn` and each `run_blocking` starts one OS thread and nothing
+/// bounds how many run at once, so this is for CLI commands and tests only; the server
+/// runs on the executor in `edge/runtime`.
 pub struct ThreadRuntime {
     shutdown: Arc<ShutdownSignal>,
 }

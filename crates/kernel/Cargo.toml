@@ -8,3 +8,8 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[features]
+# Test support for log assertions: a collecting sink, a fixed clock, line and
+# field helpers. The kernel's own tests get it without the feature.
+testing = []

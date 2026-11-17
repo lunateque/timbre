@@ -4,8 +4,10 @@
 
 mod support;
 
+use std::io::Write;
 use std::time::Duration;
-use support::{TestServer, request_with};
+use support::wire::read_until_end;
+use support::{TestServer, body_of, request_with};
 
 /// 4(a): a body over `max_body_bytes` is refused with 413 and the refusal is
 /// logged like every other answered request.
@@ -58,6 +60,46 @@ fn a_stalled_body_is_answered_408() {
             .any(|line| line.contains(r#""event":"http.body_timeout""#)
                 && line.contains(r#""code":"http.body_timeout""#)),
         "the timeout is logged with its code: {:?}",
+        server.lines()
+    );
+    server.stop();
+}
+
+/// 4(c): a request body that ends in error (the connection dies mid-body)
+/// is answered 400 through `http.body_failed`, its public message on the
+/// wire and its code in the log.
+#[test]
+fn a_failed_body_stream_answers_400_and_logs_its_code() {
+    let server = TestServer::start(|_| {});
+    let request = request_with(
+        "POST",
+        "/echo",
+        &["content-length: 100".to_owned()],
+        "xxxxxxxxxx",
+    );
+    let mut stream = server.connect();
+    stream
+        .write_all(request.as_bytes())
+        .expect("the head and a tenth of the body go out");
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .expect("the client half-closes: the body will end in error");
+    let answer = read_until_end(&mut stream);
+    assert!(
+        answer.starts_with("HTTP/1.1 400"),
+        "a body stream that failed is answered 400: {answer}"
+    );
+    assert_eq!(
+        body_of(&answer),
+        "The request body could not be read.",
+        "the answer carries the failure's public message"
+    );
+    assert!(
+        server.lines().iter().any(|line| {
+            line.contains(r#""event":"http.body_failed""#)
+                && line.contains(r#""code":"http.body_failed""#)
+        }),
+        "the failed body is logged with its code: {:?}",
         server.lines()
     );
     server.stop();

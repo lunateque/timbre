@@ -1,8 +1,12 @@
 //! Shared harness: a real `serve` on a current-thread tokio runtime in its
 //! own thread, a kernel with test routes, and a JSON log read from memory.
+//!
+//! Every test file includes this module whole; helpers one file does not use
+//! must not fail the no-dead-code gate in the others.
+#![expect(dead_code, reason = "shared harness; each test file uses a subset")]
 
 use std::collections::VecDeque;
-use std::io::{ErrorKind, Read, Write};
+use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -11,13 +15,15 @@ use std::time::{Duration, SystemTime};
 use timbre_edge_http::{HttpConfig, serve};
 use timbre_kernel::http::{Body, Chunks, Method, Request, Response};
 use timbre_kernel::{
-    BoxFuture, Ctx, Fallible, Format, LogFilter, Logger, Registry, Runtime, ThreadRuntime,
+    BoxFuture, Ctx, Failure, Fallible, Format, Kernel, LogFilter, Logger, Registry, Runtime,
+    ThreadRuntime,
 };
 
 /// A running `serve`, its bound address and the log it has written.
 pub(crate) struct TestServer {
     pub(crate) address: SocketAddr,
     log: Arc<LogSink>,
+    kernel: Arc<Kernel>,
     runtime: Arc<ThreadRuntime>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -73,6 +79,121 @@ pub(crate) fn stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
     })
 }
 
+/// The captured `{name}` path parameter.
+pub(crate) fn param(_: Ctx, request: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async move {
+        let text = request.param.unwrap_or_default();
+        Ok(Response::new(200).with_body(Body::text(&text)))
+    })
+}
+
+/// A stream whose first chunk arrives only after 400 ms: the body outlives
+/// a handler timeout configured much shorter, so the deadline must not cut
+/// it.
+struct Delayed {
+    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
+    sent: bool,
+}
+
+impl Chunks for Delayed {
+    fn poll_chunk(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Fallible<Vec<u8>>>> {
+        let this = self.get_mut();
+        if this
+            .sleep
+            .as_mut()
+            .is_some_and(|sleep| sleep.as_mut().poll(cx).is_pending())
+        {
+            return Poll::Pending;
+        }
+        this.sleep = None;
+        if this.sent {
+            return Poll::Ready(None);
+        }
+        this.sent = true;
+        Poll::Ready(Some(Ok(b"late".to_vec())))
+    }
+}
+
+pub(crate) fn slow_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        let sleep = Box::pin(tokio::time::sleep(Duration::from_millis(400)));
+        Ok(Response::new(200).with_body(Body::Stream(Box::pin(Delayed {
+            sleep: Some(sleep),
+            sent: false,
+        }))))
+    })
+}
+
+/// A handler that answers only after 2 s: past every timeout a test sets.
+pub(crate) fn slow(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        tokio::time::sleep(Duration::from_millis(2000)).await;
+        Ok(Response::new(200).with_body(Body::text("eventually")))
+    })
+}
+
+/// A response that carries its own wrong framing headers: hyper must
+/// override them, not send them.
+pub(crate) fn wrong_length(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        Ok(Response::new(200)
+            .with_header("content-length", b"5")
+            .with_header("transfer-encoding", b"chunked")
+            .with_header("connection", b"close")
+            .with_body(Body::text("hello world")))
+    })
+}
+
+/// A stream that yields one chunk and then fails: the failure cannot change
+/// the head any more, so it must at least reach the log.
+struct Breaks {
+    polls: std::cell::Cell<usize>,
+}
+
+impl Chunks for Breaks {
+    fn poll_chunk(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Fallible<Vec<u8>>>> {
+        let count = self.polls.get();
+        self.polls.set(count + 1);
+        match count {
+            0 => Poll::Ready(Some(Ok(b"half".to_vec()))),
+            1 => Poll::Ready(Some(Err(Box::new(CloseReason) as Box<dyn Failure>))),
+            _ => Poll::Ready(None),
+        }
+    }
+}
+
+/// The kernel has no public unit failure to raise from a test stream, so the
+/// harness declares one; its code names the situation in the log.
+struct CloseReason;
+
+impl std::fmt::Debug for CloseReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("test stream failure")
+    }
+}
+
+impl Failure for CloseReason {
+    fn code(&self) -> timbre_kernel::FailureCode {
+        timbre_kernel::FailureCode::new("http.body_failed")
+    }
+
+    fn status(&self) -> u16 {
+        500
+    }
+
+    fn public_message(&self) -> &'static str {
+        "the test stream broke"
+    }
+}
+
+pub(crate) fn broken_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        Ok(Response::new(200).with_body(Body::Stream(Box::pin(Breaks {
+            polls: std::cell::Cell::new(0),
+        }))))
+    })
+}
+
 impl LogSink {
     fn append(&self, buf: &[u8]) {
         self.0
@@ -116,6 +237,12 @@ fn routes() -> Registry {
         (Method::Post, "/echo", echo),
         (Method::Post, "/query", echo_query),
         (Method::Get, "/stream", stream),
+        (Method::Get, "/broken", broken_stream),
+        (Method::Get, "/slow-stream", slow_stream),
+        (Method::Get, "/slow", slow),
+        (Method::Get, "/wrong-length", wrong_length),
+        (Method::Get, "/rest/{method}", param),
+        (Method::Post, "/rest/{method}", param),
     ] {
         registry.route(method, pattern, handler).expect("a route");
     }
@@ -183,6 +310,7 @@ impl TestServer {
         TestServer {
             address,
             log,
+            kernel,
             runtime,
             thread: Some(thread),
         }
@@ -191,40 +319,22 @@ impl TestServer {
     /// Send `request` on a fresh connection, collecting the answer until the
     /// server closes it. A reset or timeout yields whatever arrived, so a
     /// refused head can show up as 431 or as a closed connection.
+    pub(crate) fn roundtrip(&self, request: &str) -> String {
+        roundtrip_on(self.connect(), request)
+    }
+
+    /// A connection to the server with a read timeout set; `roundtrip` uses
+    /// one per request, keep-alive tests reuse a single one.
     #[expect(
         clippy::expect_used,
-        clippy::panic,
-        reason = "test helper: an unconnectable server or a broken read is a hard failure"
+        reason = "test helper: an unconnectable server is a hard failure"
     )]
-    pub(crate) fn roundtrip(&self, request: &str) -> String {
-        let mut stream = TcpStream::connect(self.address).expect("the server accepts");
+    pub(crate) fn connect(&self) -> TcpStream {
+        let stream = TcpStream::connect(self.address).expect("the server accepts");
         stream
             .set_read_timeout(Some(Duration::from_secs(10)))
             .expect("a read timeout");
-        if stream.write_all(request.as_bytes()).is_err() {
-            return String::new(); // refused the head before the write landed
-        }
-        let mut bytes = Vec::new();
-        let mut chunk = [0u8; 4096];
-        loop {
-            match stream.read(&mut chunk) {
-                Ok(0) => break,
-                Ok(read) => bytes.extend_from_slice(chunk.get(..read).unwrap_or(&[])),
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::UnexpectedEof
-                            | ErrorKind::ConnectionReset
-                            | ErrorKind::BrokenPipe
-                            | ErrorKind::WouldBlock
-                    ) =>
-                {
-                    break;
-                }
-                Err(error) => panic!("reading the answer failed: {error}"),
-            }
-        }
-        String::from_utf8_lossy(&bytes).into_owned()
+        stream
     }
 
     pub(crate) fn status_line(&self, request: &str) -> String {
@@ -236,26 +346,15 @@ impl TestServer {
     }
 
     /// The response body after the blank line, chunk-decoded if needed.
-    #[expect(
-        clippy::expect_used,
-        reason = "test helper: a headless answer is the failure to report"
-    )]
     pub(crate) fn body(&self, request: &str) -> String {
         let response = self.roundtrip(request);
-        let (head, body) = response
-            .split_once("\r\n\r\n")
-            .expect("headers, a blank line, then a body");
-        if head
-            .to_ascii_lowercase()
-            .contains("transfer-encoding: chunked")
-        {
-            dechunk(body)
-        } else {
-            body.to_owned()
-        }
+        body_of(&response)
     }
 
+    /// Every log line written so far; the kernel logger is asynchronous, so
+    /// the queue is flushed before reading.
     pub(crate) fn lines(&self) -> Vec<String> {
+        self.kernel.flush_log();
         self.log.lines()
     }
 
@@ -278,28 +377,6 @@ impl Drop for TestServer {
     }
 }
 
-/// Concatenate the payloads of a `chunked` transfer body.
-fn dechunk(body: &str) -> String {
-    let mut out = String::new();
-    let mut rest = body;
-    while let Some((size, tail)) = rest.split_once("\r\n") {
-        let Ok(len) = usize::from_str_radix(size.trim_end(), 16) else {
-            break;
-        };
-        let Some(chunk) = tail.get(..len) else { break };
-        out.push_str(chunk);
-        rest = tail.get(len + 2..).unwrap_or_default();
-    }
-    out
-}
-
-/// `METHOD target HTTP/1.1` with `connection: close` and the given extras.
-pub(crate) fn request_with(method: &str, target: &str, headers: &[String], body: &str) -> String {
-    let mut head =
-        format!("{method} {target} HTTP/1.1\r\nhost: timbre.test\r\nconnection: close\r\n");
-    for header in headers {
-        head.push_str(header);
-        head.push_str("\r\n");
-    }
-    format!("{head}\r\n{body}")
-}
+/// Raw-wire helpers shared by every test file.
+pub(crate) mod wire;
+pub(crate) use wire::{body_of, request_with, roundtrip_on};

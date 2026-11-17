@@ -1,14 +1,19 @@
-//! The logger: filter, format, clock and a mutex-guarded sink.
+//! The logger: filter, format and clock, in front of a queue that feeds the sink.
 
 use crate::ctx::RequestId;
-use crate::log::{Level, LogEvent, LogFilter, LogValue, format};
-use std::io::IsTerminal;
-use std::sync::Mutex;
-use std::sync::PoisonError;
-use std::time::SystemTime;
+use crate::log::writer::{Queue, Sink, render, write_line};
+use crate::log::{Level, LogEvent, LogFilter, LogValue};
+use std::io::{IsTerminal, Write};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
 
 /// A source of timestamps; tests pass a fixed one.
 pub type Clock = fn() -> SystemTime;
+
+/// How long an inline `warn`/`error` waits for the sink mutex before its line
+/// counts as dropped: a wedged sink never blocks the caller past this.
+const INLINE_SINK_WAIT: Duration = Duration::from_millis(50);
 
 /// The shape of a rendered line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,22 +29,37 @@ pub struct Logger {
     filter: LogFilter,
     format: Format,
     clock: Clock,
-    sink: Mutex<Box<dyn std::io::Write + Send>>,
+    sink: Arc<Sink>,
+    /// Lines counted away: a full queue, or an inline line whose sink mutex
+    /// stayed locked past the 50 ms inline bound. Shared with the writer
+    /// thread so both feed one `kernel.log_dropped` report.
+    dropped: Arc<AtomicU64>,
+    /// `None` only when the OS refused the writer thread; lines are then written inline.
+    queue: Option<Queue>,
 }
 
 impl Logger {
-    /// Build a logger over an arbitrary sink.
+    /// Build a logger over an arbitrary sink. Queued lines reach the sink from a
+    /// thread this logger starts, so call [`Logger::flush`] before reading what it
+    /// has written; `warn`/`error` lines are written by the calling thread and,
+    /// when the sink answers within the 50 ms inline bound, are in it when
+    /// `write` returns.
     pub fn new(
         filter: LogFilter,
         format: Format,
-        sink: Box<dyn std::io::Write + Send>,
+        sink: Box<dyn Write + Send>,
         clock: Clock,
     ) -> Self {
+        let sink: Arc<Sink> = Arc::new(Mutex::new(sink));
+        let dropped = Arc::new(AtomicU64::new(0));
+        let queue = Queue::start(Arc::clone(&sink), format, clock, Arc::clone(&dropped));
         Self {
             filter,
             format,
             clock,
-            sink: Mutex::new(sink),
+            sink,
+            dropped,
+            queue,
         }
     }
 
@@ -58,8 +78,14 @@ impl Logger {
         level <= self.filter.level_for(module)
     }
 
-    /// Render and write one line, when its level passes the module's threshold.
-    /// Writing never fails the caller: a broken sink must not stop the server.
+    /// Render one line, when its level passes the module's threshold.
+    ///
+    /// `warn` and `error` lines are written inline, under the sink mutex, so
+    /// they reach the sink ahead of everything queued; the wait for the mutex
+    /// is bounded at 50 ms and a line that finds the sink still locked is
+    /// dropped and counted like a queued overflow. Everything else goes
+    /// through the bounded queue: a full queue drops the line and counts it,
+    /// so the caller never waits on the sink.
     pub fn write(
         &self,
         request: Option<RequestId>,
@@ -70,163 +96,55 @@ impl Logger {
         if !self.enabled(level, event.module()) {
             return;
         }
-        let now = (self.clock)();
-        let line = match self.format {
-            Format::Json => format::json(now, level, event, request, fields),
-            Format::Pretty => format::pretty(now, level, event, request, fields),
-        };
-        let mut sink = self.sink.lock().unwrap_or_else(PoisonError::into_inner);
-        // Logging never fails the caller, so sink errors are dropped.
-        let _ = sink.write_all(line.as_bytes()).and_then(|()| sink.flush());
+        let line = render(self.format, (self.clock)(), level, event, request, fields);
+        if level <= Level::Warn {
+            if !write_line_bounded(&self.sink, &line, INLINE_SINK_WAIT) {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+        match &self.queue {
+            Some(queue) => queue.push(line),
+            None => write_line(&self.sink, &line),
+        }
+    }
+
+    /// Report any lines dropped since the last call (bypassing the module
+    /// filter, at `warn`, even when `kernel` is filtered above that), then block
+    /// until every queued line has reached the sink. Returns whether the sink
+    /// caught up within the wait bound; a wedged sink costs a caller the bound,
+    /// never a hang.
+    pub fn flush(&self) -> bool {
+        match &self.queue {
+            Some(queue) => queue.flush(),
+            None => true,
+        }
     }
 }
 
-#[cfg(test)]
-pub(crate) mod tests {
-    use super::*;
-    use crate::registry::Kernel;
-    use crate::{Ctx, LogEvent, Registry, RequestId, Secret, log};
-    use std::cell::Cell;
-    use std::io::Write;
-    use std::sync::{Arc, Mutex};
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
-
-    pub(crate) const GREETED: LogEvent = LogEvent::new("hello.greeted");
-
-    pub(crate) fn fixed() -> SystemTime {
-        UNIX_EPOCH + Duration::from_millis(1_794_832_496_789)
-    }
-
-    #[derive(Clone, Default)]
-    pub(crate) struct Shared(Arc<Mutex<Vec<u8>>>);
-
-    impl Write for Shared {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            let mut guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            guard.extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl Shared {
-        pub(crate) fn text(&self) -> String {
-            let guard = self.0.lock().unwrap_or_else(PoisonError::into_inner);
-            String::from_utf8(guard.clone()).expect("logs are utf-8")
-        }
-    }
-
-    pub(crate) fn kernel(sink: Shared, format: Format, filter: &str) -> Arc<Kernel> {
-        let filter = LogFilter::parse(filter).expect("test filter parses");
-        Registry::new().finish(
-            Logger::new(filter, format, Box::new(sink), fixed),
-            Arc::new(crate::ThreadRuntime::new()),
-        )
-    }
-
-    fn logged_call(ctx: &Ctx) {
-        log!(
-            ctx,
-            info,
-            GREETED,
-            greeting = "hi \"x\"\n",
-            n = -3i32,
-            ok = true,
-            ms = Duration::from_millis(1500),
-            token = Secret::new("abc"),
-            level = "x"
-        );
-    }
-
-    #[test]
-    fn json_line_is_exact() {
-        let sink = Shared::default();
-        let kernel = kernel(sink.clone(), Format::Json, "info");
-        let ctx = Ctx::root(&kernel).with_request(RequestId::new(255));
-        logged_call(&ctx);
-        assert_eq!(
-            sink.text(),
-            "{\"ts\":\"2026-11-16T12:34:56.789Z\",\"level\":\"info\",\"event\":\"hello.greeted\",\"request\":\"00000000000000ff\",\"greeting\":\"hi \\\"x\\\"\\n\",\"n\":-3,\"ok\":true,\"ms\":1500,\"token\":\"***\",\"f_level\":\"x\"}\n"
-        );
-    }
-
-    #[test]
-    fn pretty_line_is_exact() {
-        let sink = Shared::default();
-        let kernel = kernel(sink.clone(), Format::Pretty, "info");
-        let ctx = Ctx::root(&kernel).with_request(RequestId::new(255));
-        logged_call(&ctx);
-        assert_eq!(
-            sink.text(),
-            "12:34:56.789 INFO  hello.greeted request=00000000000000ff greeting=\"hi \\\"x\\\"\\n\" n=-3 ok=true ms=1500 token=*** f_level=\"x\"\n"
-        );
-    }
-
-    #[test]
-    fn non_finite_float_is_json_null() {
-        let sink = Shared::default();
-        let kernel = kernel(sink.clone(), Format::Json, "info");
-        let ctx = Ctx::root(&kernel);
-        log!(ctx, info, GREETED, x = f64::NAN);
-        assert_eq!(
-            sink.text(),
-            "{\"ts\":\"2026-11-16T12:34:56.789Z\",\"level\":\"info\",\"event\":\"hello.greeted\",\"x\":null}\n"
-        );
-    }
-
-    #[test]
-    fn control_characters_escape_as_unicode() {
-        let sink = Shared::default();
-        let kernel = kernel(sink.clone(), Format::Json, "info");
-        let ctx = Ctx::root(&kernel);
-        let one = char::from_u32(1).expect("U+0001 is a scalar value");
-        let input = one.to_string();
-        log!(ctx, info, GREETED, s = input.as_str());
-        // Raw string: a literal backslash, u, 0, 0, 0, 1 in the output.
-        assert!(
-            sink.text().contains(r#""s":"\u0001""#),
-            "U+0001 must escape, got {}",
-            sink.text()
-        );
-    }
-
-    #[test]
-    fn disabled_lines_skip_writing_and_fields() {
-        let sink = Shared::default();
-        let kernel = kernel(sink.clone(), Format::Json, "warn");
-        let ctx = Ctx::root(&kernel);
-        let counter = Cell::new(0u32);
-        log!(
-            ctx,
-            info,
-            GREETED,
-            n = {
-                counter.set(counter.get() + 1);
-                1
+/// Write one inline line, waiting at most `bound` for the sink mutex with a
+/// growing sleep between attempts. `false` when the mutex stayed locked past
+/// the bound: the line was not written and the caller counts it dropped.
+/// Logging never fails the caller, so sink errors are dropped like everywhere
+/// else. A poisoned mutex is taken anyway, as in `write_line`.
+fn write_line_bounded(sink: &Sink, line: &str, bound: Duration) -> bool {
+    let deadline = Instant::now() + bound;
+    let mut delay = Duration::from_micros(50);
+    let mut sink = loop {
+        match sink.try_lock() {
+            Ok(guard) => break guard,
+            Err(std::sync::TryLockError::Poisoned(error)) => break error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
+                }
+                let remaining = deadline - now;
+                std::thread::sleep(delay.min(remaining).min(Duration::from_millis(5)));
+                delay = delay.saturating_mul(2);
             }
-        );
-        assert_eq!(sink.text(), "");
-        assert_eq!(counter.get(), 0);
-    }
-
-    #[test]
-    fn module_override_sets_its_own_threshold() {
-        let sink = Shared::default();
-        let kernel = kernel(sink.clone(), Format::Json, "warn,hello=debug");
-        let ctx = Ctx::root(&kernel);
-        log!(ctx, debug, GREETED);
-        log!(ctx, trace, GREETED);
-        let text = sink.text();
-        let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 1, "only debug must be written: {text}");
-        assert!(
-            lines
-                .first()
-                .expect("one line")
-                .contains(r#""level":"debug""#)
-        );
-    }
+        }
+    };
+    let _ = sink.write_all(line.as_bytes()).and_then(|()| sink.flush());
+    true
 }

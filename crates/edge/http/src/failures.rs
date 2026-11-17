@@ -12,12 +12,15 @@ pub const BODY_FAILED: FailureCode = FailureCode::new("http.body_failed");
 /// The client sent its request body slower than
 /// [`HttpConfig::body_read_timeout`](crate::HttpConfig::body_read_timeout).
 pub const BODY_TIMEOUT: FailureCode = FailureCode::new("http.body_timeout");
+/// A route handler did not produce its response within
+/// [`HttpConfig::handler_timeout`](crate::HttpConfig::handler_timeout).
+pub const HANDLER_TIMEOUT: FailureCode = FailureCode::new("http.handler_timeout");
 
 /// Failures raised while serving HTTP.
 #[derive(Debug)]
 pub enum HttpFailure {
     /// `address` is the listen entry that failed; `reason` says how.
-    Bind {
+    BindFailed {
         /// The configured address that could not be used.
         address: String,
         /// The operating system's or parser's complaint.
@@ -28,35 +31,41 @@ pub enum HttpFailure {
         /// The rejected proxy entry.
         entry: String,
     },
-    /// The incoming body could not be read.
-    BodyUnavailable,
+    /// The incoming body could not be read; the client is answered 400.
+    BodyFailed,
     /// The body arrived slower than `HttpConfig::body_read_timeout` allows.
     BodyTimeout,
+    /// The handler was still running when `HttpConfig::handler_timeout`
+    /// expired; the response it eventually produces is dropped.
+    HandlerTimeout,
 }
 
 impl Failure for HttpFailure {
     fn code(&self) -> FailureCode {
         match self {
-            Self::Bind { .. } => BIND_FAILED,
+            Self::BindFailed { .. } => BIND_FAILED,
             Self::ProxyInvalid { .. } => PROXY_INVALID,
-            Self::BodyUnavailable => BODY_FAILED,
+            Self::BodyFailed => BODY_FAILED,
             Self::BodyTimeout => BODY_TIMEOUT,
+            Self::HandlerTimeout => HANDLER_TIMEOUT,
         }
     }
 
     fn status(&self) -> u16 {
         match self {
-            Self::Bind { .. } | Self::ProxyInvalid { .. } => 500,
-            Self::BodyUnavailable => 400,
+            Self::BindFailed { .. } | Self::ProxyInvalid { .. } => 500,
+            Self::BodyFailed => 400,
             Self::BodyTimeout => 408,
+            Self::HandlerTimeout => 504,
         }
     }
 
     fn public_message(&self) -> &str {
         match self {
-            Self::Bind { .. } | Self::ProxyInvalid { .. } => "The server failed to start.",
-            Self::BodyUnavailable => "The request body could not be read.",
+            Self::BindFailed { .. } | Self::ProxyInvalid { .. } => "The server failed to start.",
+            Self::BodyFailed => "The request body could not be read.",
             Self::BodyTimeout => "The request body did not arrive in time.",
+            Self::HandlerTimeout => "The request took too long to answer.",
         }
     }
 }

@@ -89,7 +89,9 @@ pub struct Request {
     pub param: Option<String>,
     /// Query parameters in wire order; keys may repeat.
     pub query: Vec<(String, String)>,
-    /// Headers in wire order, names lowercased by the edge.
+    /// Headers as `(name, value)` pairs: names are lowercased by the edge,
+    /// the values of one name keep their receipt order, but the order across
+    /// different names is not guaranteed.
     pub headers: Vec<(String, Vec<u8>)>,
     /// The address the connection came from.
     pub peer: SocketAddr,

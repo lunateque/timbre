@@ -3,11 +3,11 @@
 mod filter;
 mod format;
 mod logger;
+#[cfg(test)]
+mod tests;
 mod time;
 mod value;
-
-#[cfg(test)]
-pub(crate) use logger::tests as log_tests;
+mod writer;
 
 pub use filter::LogFilter;
 pub use logger::{Clock, Format, Logger};

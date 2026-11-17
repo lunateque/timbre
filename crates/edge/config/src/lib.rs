@@ -7,9 +7,11 @@
 
 #![warn(missing_docs)]
 
-mod failures;
+pub mod failures;
+mod redact;
 
-pub use failures::{ConfigFailure, INVALID};
+use crate::failures::ConfigFailure;
+use redact::hide_value;
 
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
@@ -56,18 +58,6 @@ pub struct LogSection {
     pub filter: Option<String>,
 }
 
-/// The binary's `[http]` section; absent keys fall back to the edge's defaults.
-#[derive(serde::Deserialize, Default)]
-#[serde(crate = "crate::serde", default)]
-pub struct HttpSection {
-    /// Listen addresses.
-    pub listen: Option<Vec<String>>,
-    /// Trusted proxy entries.
-    pub trusted_proxies: Option<Vec<String>>,
-    /// The body size cap.
-    pub max_body_bytes: Option<usize>,
-}
-
 impl Config {
     /// Read the config. `explicit` wins over `TIMBRE_CONFIG`, which wins over
     /// `./timbre.toml`; none of them existing means an empty document, so every
@@ -94,14 +84,16 @@ impl Config {
             Box::new(ConfigFailure::Invalid {
                 file: path.display().to_string(),
                 line: None,
-                reason: error.to_string(),
+                reason: hide_value(&error.to_string()),
             }) as Box<dyn timbre_kernel::Failure>
         })?;
         let document = toml::from_str::<toml::Table>(&text).map_err(|error| {
             Box::new(ConfigFailure::Invalid {
                 file: path.display().to_string(),
                 line: line_of(&text, error.span()),
-                reason: error.to_string(),
+                // `Display` quotes the offending source line back; a config
+                // value can be a secret, so only the parser's own words stay.
+                reason: hide_value(error.message()),
             }) as Box<dyn timbre_kernel::Failure>
         })?;
         Ok(Config {
@@ -175,10 +167,13 @@ impl Config {
             table.insert(field, parsed);
         }
         toml::Value::Table(table).try_into().map_err(|error| {
+            // `{error}` is the parser's message plus the key chain (`in
+            // \`data_dir\``); the key stays, the offending literal goes.
+            let reason = format!("the section `{name}` is malformed: {error}");
             Box::new(ConfigFailure::Invalid {
                 file: self.file_name(),
                 line: None,
-                reason: format!("the section `{name}` is malformed: {error}"),
+                reason: hide_value(&reason),
             }) as Box<dyn timbre_kernel::Failure>
         })
     }
@@ -205,142 +200,4 @@ fn line_of(text: &str, span: Option<std::ops::Range<usize>>) -> Option<usize> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde::Deserialize;
-    use std::sync::atomic::{AtomicU32, Ordering};
-
-    #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
-    #[serde(crate = "crate::serde", default)]
-    struct Sample {
-        name: String,
-        port: u16,
-        list: Vec<String>,
-    }
-
-    // A process-unique scratch directory; env and files must not collide
-    // between parallel tests or earlier runs.
-    struct Dir(PathBuf);
-
-    impl Dir {
-        fn new(tag: &str) -> Dir {
-            static COUNTER: AtomicU32 = AtomicU32::new(0);
-            let unique = format!(
-                "timbre-config-test-{}-{tag}-{}",
-                std::process::id(),
-                COUNTER.fetch_add(1, Ordering::SeqCst)
-            );
-            let path = std::env::temp_dir().join(unique);
-            std::fs::create_dir_all(&path).expect("the scratch directory exists");
-            Dir(path)
-        }
-
-        fn file(&self, content: &str) -> PathBuf {
-            let path = self.0.join("timbre.toml");
-            std::fs::write(&path, content).expect("the config file is written");
-            path
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn a_missing_file_is_defaults() {
-        let dir = Dir::new("missing");
-        let config = Config::load(Some(&dir.0.join("absent.toml"))).expect("absent is defaults");
-        assert_eq!(config.path(), None);
-        assert_eq!(
-            config.section::<Sample>("absent").expect("defaults"),
-            Sample::default()
-        );
-    }
-
-    #[test]
-    fn a_broken_file_names_it_and_the_line() {
-        let dir = Dir::new("broken");
-        let path = dir.file("name = \"x\"\n[bad = =\n");
-        let error = Config::load(Some(&path))
-            .err()
-            .expect("a parse error fails the load");
-        assert_eq!(error.code(), INVALID);
-        let message = format!("{error:?}");
-        assert!(message.contains("timbre.toml"), "{message}");
-        assert!(
-            message.contains("line: Some(2)"),
-            "line 2 is reported: {message}"
-        );
-    }
-
-    #[test]
-    fn environment_wins_over_the_file_and_the_file_over_defaults() {
-        let dir = Dir::new("precedence");
-        let path = dir.file("[precedence]\nname = \"from-file\"\nport = 1\n");
-        let config = Config::load(Some(&path)).expect("the file parses");
-        let section: Sample = config
-            .section_with(
-                "precedence",
-                [("TIMBRE_PRECEDENCE__PORT".to_owned(), "2".to_owned())],
-            )
-            .expect("the override deserializes");
-        // env overrides the file; the file overrides the default.
-        assert_eq!(
-            section,
-            Sample {
-                name: "from-file".to_owned(),
-                port: 2,
-                list: Vec::new(),
-            }
-        );
-    }
-
-    #[test]
-    fn a_non_parsing_override_value_becomes_a_string() {
-        let dir = Dir::new("string");
-        let config = Config::load(Some(&dir.file(""))).expect("an empty file parses");
-        let section: Sample = config
-            .section_with(
-                "string",
-                [("TIMBRE_STRING__NAME".to_owned(), "raw text".to_owned())],
-            )
-            .expect("the string value lands in the string field");
-        assert_eq!(section.name, "raw text");
-    }
-
-    #[test]
-    fn an_override_value_may_be_a_toml_array() {
-        let dir = Dir::new("array");
-        let config = Config::load(Some(&dir.file(""))).expect("an empty file parses");
-        let section: Sample = config
-            .section_with(
-                "array",
-                [("TIMBRE_ARRAY__LIST".to_owned(), r#"["a","b"]"#.to_owned())],
-            )
-            .expect("the array value lands in the list field");
-        assert_eq!(section.list, ["a", "b"]);
-    }
-
-    #[test]
-    fn a_malformed_section_is_invalid() {
-        let dir = Dir::new("malformed");
-        let config = Config::load(Some(&dir.file("[malformed]\nport = \"not-a-number\"\n")))
-            .expect("the file parses");
-        let error = config
-            .section::<Sample>("malformed")
-            .expect_err("a string is not a port number");
-        assert_eq!(error.code(), INVALID);
-    }
-
-    #[test]
-    fn a_section_that_is_not_a_table_is_invalid() {
-        let dir = Dir::new("scalar");
-        let config = Config::load(Some(&dir.file("scalar = 1"))).expect("the file parses");
-        let error = config
-            .section::<Sample>("scalar")
-            .expect_err("a scalar is not a section");
-        assert_eq!(error.code(), INVALID);
-    }
-}
+mod tests;

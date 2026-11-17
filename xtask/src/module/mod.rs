@@ -141,10 +141,18 @@ pub(crate) fn render_modules(ids: &[String]) -> String {
 }
 
 fn refresh(root: &Path) -> Outcome {
-    // `cargo update --workspace` only re-resolves the workspace members: it is how a
-    // changed member set reaches `Cargo.lock` without external crates, which none of
-    // the server crates have.
-    process::run("cargo", &["update", "--workspace"], root)?;
+    // `--workspace` re-resolves only the members, so a changed member set reaches
+    // `Cargo.lock` without moving any external crate. `--offline` keeps the refresh from
+    // fetching the registry index: the lock already pins every external crate, so a
+    // failure here means the lock was already stale (a new external crate with no
+    // vendored copy) and only a fetch can finish it.
+    if let Err(error) = process::run("cargo", &["update", "--workspace", "--offline"], root) {
+        return Err(format!(
+            "Cargo.lock is stale for the new manifest: {error}\n\
+             any `cargo` command without `--locked` (for example `cargo check`) will \
+             fetch and finish the lock; re-run this command afterwards"
+        ));
+    }
     process::run("cargo", &["fmt", "--all"], root)
 }
 

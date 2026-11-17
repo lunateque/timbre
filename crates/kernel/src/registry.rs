@@ -7,13 +7,14 @@ use crate::credential::{CredentialKind, CredentialProvider, CredentialTable};
 use crate::failure::Fallible;
 use crate::failures::KernelFailure;
 use crate::identity::{Permission, PermissionEntry};
-use crate::jobs::{JobHandler, JobTable};
+use crate::jobs::{JobHandler, JobTable, JobTracker};
 use crate::log::Logger;
 use crate::migration::Migration;
 use crate::port::{Port, Ports};
 use crate::route::{RouteHandler, RouteMatch, RouteTable};
 use crate::runtime::Runtime;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// The finished, read-only service core every `Ctx` points at.
 pub struct Kernel {
@@ -23,6 +24,7 @@ pub struct Kernel {
     ports: Ports,
     routes: RouteTable,
     jobs: JobTable,
+    running_jobs: JobTracker,
     permissions: Vec<PermissionEntry>,
     credentials: CredentialTable,
     migrations: Vec<Migration>,
@@ -32,6 +34,15 @@ pub struct Kernel {
 impl Kernel {
     pub(crate) fn logger(&self) -> &Logger {
         &self.logger
+    }
+
+    /// Report any dropped log lines, then block until every queued line is
+    /// written; for tests and shutdown. Returns whether the sink caught up
+    /// within the wait bound (2 s): `false` means a wedged sink still holds
+    /// lines, not that the caller hung. Callers that do not read lines back
+    /// can ignore the answer.
+    pub fn flush_log(&self) -> bool {
+        self.logger.flush()
     }
 
     pub(crate) fn bus(&self) -> &Bus {
@@ -52,7 +63,15 @@ impl Kernel {
     /// Start every registered job on the runtime, logging each job's start,
     /// end and failure. The binary calls this after `Started` is published.
     pub fn start_jobs(&self, ctx: &crate::Ctx) {
-        self.jobs.start(ctx);
+        self.jobs.start(ctx, &self.running_jobs);
+    }
+
+    /// Whether every job started by [`Kernel::start_jobs`] has finished within
+    /// `timeout`. The binary calls it at shutdown, before flushing the log, so
+    /// a job's last lines are not lost behind a still-running future.
+    #[must_use]
+    pub fn wait_jobs(&self, timeout: Duration) -> bool {
+        self.running_jobs.wait(timeout)
     }
 
     pub(crate) fn ports(&self) -> &Ports {
@@ -258,6 +277,7 @@ impl Registry {
             ports: self.ports,
             routes: self.routes,
             jobs: self.jobs,
+            running_jobs: JobTracker::new(),
             permissions: self.permissions,
             credentials: self.credentials,
             migrations: self.migrations,

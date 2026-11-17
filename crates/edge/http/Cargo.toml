@@ -25,6 +25,7 @@ hyper-util = { workspace = true, features = [
     "tokio",
 ] }
 percent-encoding = { workspace = true }
+timbre-edge-config.workspace = true
 timbre-kernel.workspace = true
 tokio = { workspace = true, features = [
     "io-util",
