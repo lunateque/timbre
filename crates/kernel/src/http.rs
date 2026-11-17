@@ -55,8 +55,11 @@ pub enum Body {
     /// A body held whole in memory.
     Bytes(Vec<u8>),
     /// A body produced chunk by chunk; large outputs stream this way so no
-    /// full result set is held in memory.
-    Stream(Pin<Box<dyn Chunks>>),
+    /// full result set is held in memory. `Send + Sync`: a request reference
+    /// lives across the guard's authentication await inside a future the
+    /// HTTP edge spawns, so the borrowed body must cross threads by shared
+    /// reference, not only by move.
+    Stream(Pin<Box<dyn Chunks + Send + Sync>>),
 }
 
 impl Body {

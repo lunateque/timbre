@@ -15,6 +15,9 @@ pub const BODY_TIMEOUT: FailureCode = FailureCode::new("http.body_timeout");
 /// A route handler did not produce its response within
 /// [`HttpConfig::handler_timeout`](crate::HttpConfig::handler_timeout).
 pub const HANDLER_TIMEOUT: FailureCode = FailureCode::new("http.handler_timeout");
+/// A route's guard check did not finish within
+/// [`HttpConfig::guard_timeout`](crate::HttpConfig::guard_timeout).
+pub const GUARD_TIMEOUT: FailureCode = FailureCode::new("http.guard_timeout");
 
 /// Failures raised while serving HTTP.
 #[derive(Debug)]
@@ -38,6 +41,10 @@ pub enum HttpFailure {
     /// The handler was still running when `HttpConfig::handler_timeout`
     /// expired; the response it eventually produces is dropped.
     HandlerTimeout,
+    /// The guard check was still running when `HttpConfig::guard_timeout`
+    /// expired; the future outcome of the check (including a response a
+    /// handler it authorized eventually produces) is dropped.
+    GuardTimeout,
 }
 
 impl Failure for HttpFailure {
@@ -48,6 +55,7 @@ impl Failure for HttpFailure {
             Self::BodyFailed => BODY_FAILED,
             Self::BodyTimeout => BODY_TIMEOUT,
             Self::HandlerTimeout => HANDLER_TIMEOUT,
+            Self::GuardTimeout => GUARD_TIMEOUT,
         }
     }
 
@@ -56,7 +64,7 @@ impl Failure for HttpFailure {
             Self::BindFailed { .. } | Self::ProxyInvalid { .. } => 500,
             Self::BodyFailed => 400,
             Self::BodyTimeout => 408,
-            Self::HandlerTimeout => 504,
+            Self::HandlerTimeout | Self::GuardTimeout => 504,
         }
     }
 
@@ -65,7 +73,7 @@ impl Failure for HttpFailure {
             Self::BindFailed { .. } | Self::ProxyInvalid { .. } => "The server failed to start.",
             Self::BodyFailed => "The request body could not be read.",
             Self::BodyTimeout => "The request body did not arrive in time.",
-            Self::HandlerTimeout => "The request took too long to answer.",
+            Self::HandlerTimeout | Self::GuardTimeout => "The request took too long to answer.",
         }
     }
 }

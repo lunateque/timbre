@@ -22,6 +22,9 @@ pub const PARAMS_REFUSED: LogEvent = LogEvent::new("http.params_refused");
 /// A handler did not produce its response within `handler_timeout`; the
 /// client is answered 504.
 pub const HANDLER_TIMEOUT: LogEvent = LogEvent::new("http.handler_timeout");
+/// A route's guard check did not finish within `guard_timeout`; the client
+/// is answered 504.
+pub const GUARD_TIMEOUT: LogEvent = LogEvent::new("http.guard_timeout");
 /// A streaming response body failed after its head was already on the wire;
 /// the body ends where it broke, so only the log says so.
 pub const STREAM_FAILED: LogEvent = LogEvent::new("http.stream_failed");

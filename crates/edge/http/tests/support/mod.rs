@@ -2,28 +2,34 @@
 //! own thread, a kernel with test routes, and a JSON log read from memory.
 //!
 //! Every test file includes this module whole; helpers one file does not use
-//! must not fail the no-dead-code gate in the others.
+//! must not fail the no-dead-code gate in the others. The fixtures live in
+//! sibling files, re-exported here so `support::name` stays the one path:
+//! plain handlers in [`handlers`], the guard fixtures in [`guard`], raw-wire
+//! request builders in [`wire`].
 #![expect(dead_code, reason = "shared harness; each test file uses a subset")]
 
-use std::collections::VecDeque;
+pub(crate) mod guard;
+pub(crate) mod handlers;
+pub(crate) mod wire;
+
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
-use std::pin::Pin;
 use std::sync::{Arc, Mutex, PoisonError};
-use std::task::{Context, Poll};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 use timbre_edge_http::{HttpConfig, serve};
-use timbre_kernel::http::{Body, Chunks, Method, Request, Response};
+use timbre_kernel::http::Method;
 use timbre_kernel::{
-    BoxFuture, Ctx, Failure, Fallible, Format, Kernel, LogFilter, Logger, Registry, Runtime,
-    ThreadRuntime,
+    CredentialKind, Ctx, Format, Guard, Kernel, LogFilter, Logger, Registry, Runtime, ThreadRuntime,
 };
+
+use handlers::{broken_stream, echo, echo_query, param, slow, slow_stream, stream, wrong_length};
 
 /// A running `serve`, its bound address and the log it has written.
 pub(crate) struct TestServer {
     pub(crate) address: SocketAddr,
     log: Arc<LogSink>,
     kernel: Arc<Kernel>,
+    counter: Arc<dyn guard::Counter>,
     runtime: Arc<ThreadRuntime>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
@@ -34,165 +40,6 @@ struct LogSink(Mutex<Vec<u8>>);
 
 /// A boxed `Write` handle onto the shared sink.
 struct LogSinkRef(Arc<LogSink>);
-
-pub(crate) fn echo(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async {
-        Ok(Response::new(200)
-            .with_header("content-type", b"text/plain; charset=utf-8")
-            .with_body(Body::text("hello")))
-    })
-}
-
-/// The merged query, in wire order: `key=value` pairs joined by `;`.
-pub(crate) fn echo_query(_: Ctx, request: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async move {
-        let text = request
-            .query
-            .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .collect::<Vec<String>>()
-            .join(";");
-        Ok(Response::new(200)
-            .with_header("content-type", b"text/plain; charset=utf-8")
-            .with_body(Body::text(&text)))
-    })
-}
-
-/// A two-chunk stream body: `Body::Stream` must reach the wire whole.
-struct TwoChunks(VecDeque<Vec<u8>>);
-
-impl Chunks for TwoChunks {
-    fn poll_chunk(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Fallible<Vec<u8>>>> {
-        match self.get_mut().0.pop_front() {
-            Some(chunk) => Poll::Ready(Some(Ok(chunk))),
-            None => Poll::Ready(None),
-        }
-    }
-}
-
-pub(crate) fn stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async {
-        let chunks = VecDeque::from(vec![b"first-".to_vec(), b"second".to_vec()]);
-        Ok(Response::new(200)
-            .with_header("content-type", b"text/plain; charset=utf-8")
-            .with_body(Body::Stream(Box::pin(TwoChunks(chunks)))))
-    })
-}
-
-/// The captured `{name}` path parameter.
-pub(crate) fn param(_: Ctx, request: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async move {
-        let text = request.param.unwrap_or_default();
-        Ok(Response::new(200).with_body(Body::text(&text)))
-    })
-}
-
-/// A stream whose first chunk arrives only after 400 ms: the body outlives
-/// a handler timeout configured much shorter, so the deadline must not cut
-/// it.
-struct Delayed {
-    sleep: Option<Pin<Box<tokio::time::Sleep>>>,
-    sent: bool,
-}
-
-impl Chunks for Delayed {
-    fn poll_chunk(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Fallible<Vec<u8>>>> {
-        let this = self.get_mut();
-        if this
-            .sleep
-            .as_mut()
-            .is_some_and(|sleep| sleep.as_mut().poll(cx).is_pending())
-        {
-            return Poll::Pending;
-        }
-        this.sleep = None;
-        if this.sent {
-            return Poll::Ready(None);
-        }
-        this.sent = true;
-        Poll::Ready(Some(Ok(b"late".to_vec())))
-    }
-}
-
-pub(crate) fn slow_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async {
-        let sleep = Box::pin(tokio::time::sleep(Duration::from_millis(400)));
-        Ok(Response::new(200).with_body(Body::Stream(Box::pin(Delayed {
-            sleep: Some(sleep),
-            sent: false,
-        }))))
-    })
-}
-
-/// A handler that answers only after 2 s: past every timeout a test sets.
-pub(crate) fn slow(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async {
-        tokio::time::sleep(Duration::from_millis(2000)).await;
-        Ok(Response::new(200).with_body(Body::text("eventually")))
-    })
-}
-
-/// A response that carries its own wrong framing headers: hyper must
-/// override them, not send them.
-pub(crate) fn wrong_length(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async {
-        Ok(Response::new(200)
-            .with_header("content-length", b"5")
-            .with_header("transfer-encoding", b"chunked")
-            .with_header("connection", b"close")
-            .with_body(Body::text("hello world")))
-    })
-}
-
-/// A stream that yields one chunk and then fails: the failure cannot change
-/// the head any more, so it must at least reach the log.
-struct Breaks {
-    polls: std::cell::Cell<usize>,
-}
-
-impl Chunks for Breaks {
-    fn poll_chunk(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Fallible<Vec<u8>>>> {
-        let count = self.polls.get();
-        self.polls.set(count + 1);
-        match count {
-            0 => Poll::Ready(Some(Ok(b"half".to_vec()))),
-            1 => Poll::Ready(Some(Err(Box::new(CloseReason) as Box<dyn Failure>))),
-            _ => Poll::Ready(None),
-        }
-    }
-}
-
-/// The kernel has no public unit failure to raise from a test stream, so the
-/// harness declares one; its code names the situation in the log.
-struct CloseReason;
-
-impl std::fmt::Debug for CloseReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("test stream failure")
-    }
-}
-
-impl Failure for CloseReason {
-    fn code(&self) -> timbre_kernel::FailureCode {
-        timbre_kernel::FailureCode::new("http.body_failed")
-    }
-
-    fn status(&self) -> u16 {
-        500
-    }
-
-    fn public_message(&self) -> &'static str {
-        "the test stream broke"
-    }
-}
-
-pub(crate) fn broken_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
-    Box::pin(async {
-        Ok(Response::new(200).with_body(Body::Stream(Box::pin(Breaks {
-            polls: std::cell::Cell::new(0),
-        }))))
-    })
-}
 
 impl LogSink {
     fn append(&self, buf: &[u8]) {
@@ -230,7 +77,7 @@ impl Write for LogSinkRef {
     clippy::expect_used,
     reason = "test fixture: a refused registration is a bug in this file"
 )]
-fn routes() -> Registry {
+fn routes(counter: Arc<guard::SharedCounter>) -> Registry {
     let mut registry = Registry::new();
     for (method, pattern, handler) in [
         (Method::Get, "/echo", echo as fn(_, _) -> _),
@@ -244,8 +91,57 @@ fn routes() -> Registry {
         (Method::Get, "/rest/{method}", param),
         (Method::Post, "/rest/{method}", param),
     ] {
-        registry.route(method, pattern, handler).expect("a route");
+        registry
+            .route(method, pattern, Guard::Public, handler)
+            .expect("a route");
     }
+    // The guarded routes: `/guarded` asks the scheme the fake provider
+    // owns; `/admin` asks a permission the fake identity does not hold.
+    registry
+        .route(
+            Method::Get,
+            "/guarded",
+            guard::read_guard(),
+            guard::guarded_echo,
+        )
+        .expect("the read route");
+    registry
+        .route(
+            Method::Get,
+            "/admin",
+            guard::admin_guard(),
+            guard::guarded_echo,
+        )
+        .expect("the admin route");
+    // A guarded form POST: its credential travels in the body, so this
+    // route proves the edge buffers the body before checking the guard.
+    registry
+        .route(
+            Method::Post,
+            "/guarded-form",
+            guard::form_guard(),
+            guard::guarded_echo,
+        )
+        .expect("the guarded form route");
+    // A guarded GET whose handler reports the body size: proves the body
+    // buffered after a passed check still reaches the handler.
+    registry
+        .route(
+            Method::Get,
+            "/guarded-body",
+            guard::read_guard(),
+            guard::guarded_body_len,
+        )
+        .expect("the guarded body route");
+    registry
+        .credential_provider(
+            CredentialKind::Scheme(guard::TEST_SCHEME),
+            guard::provider() as Arc<dyn timbre_kernel::CredentialProvider>,
+        )
+        .expect("the fake scheme owner");
+    registry
+        .provide::<dyn guard::Counter>(counter)
+        .expect("the counter port");
     registry
 }
 
@@ -271,7 +167,7 @@ fn wait_for_address(log: &Arc<LogSink>) -> SocketAddr {
         if let Some(address) = bound {
             return address;
         }
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(std::time::Duration::from_millis(5));
     }
     panic!("serve never logged its bound address")
 }
@@ -290,6 +186,7 @@ impl TestServer {
         };
         configure(&mut config);
         let log = Arc::new(LogSink::default());
+        let counter = Arc::new(guard::SharedCounter::default());
         let runtime = Arc::new(ThreadRuntime::new());
         let logger = Logger::new(
             LogFilter::default(),
@@ -297,7 +194,8 @@ impl TestServer {
             Box::new(LogSinkRef(Arc::clone(&log))),
             SystemTime::now,
         );
-        let kernel = routes().finish(logger, Arc::clone(&runtime) as Arc<dyn Runtime>);
+        let kernel =
+            routes(Arc::clone(&counter)).finish(logger, Arc::clone(&runtime) as Arc<dyn Runtime>);
         let ctx = Ctx::root(&kernel);
         let thread = std::thread::spawn(move || {
             let tokio = tokio::runtime::Builder::new_current_thread()
@@ -311,9 +209,15 @@ impl TestServer {
             address,
             log,
             kernel,
+            counter,
             runtime,
             thread: Some(thread),
         }
+    }
+
+    /// How many times the guarded handler has actually run.
+    pub(crate) fn guarded_calls(&self) -> usize {
+        self.counter.calls()
     }
 
     /// Send `request` on a fresh connection, collecting the answer until the
@@ -332,7 +236,7 @@ impl TestServer {
     pub(crate) fn connect(&self) -> TcpStream {
         let stream = TcpStream::connect(self.address).expect("the server accepts");
         stream
-            .set_read_timeout(Some(Duration::from_secs(10)))
+            .set_read_timeout(Some(std::time::Duration::from_secs(10)))
             .expect("a read timeout");
         stream
     }
@@ -377,6 +281,4 @@ impl Drop for TestServer {
     }
 }
 
-/// Raw-wire helpers shared by every test file.
-pub(crate) mod wire;
 pub(crate) use wire::{body_of, request_with, roundtrip_on};

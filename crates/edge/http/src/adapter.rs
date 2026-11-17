@@ -115,6 +115,23 @@ pub(crate) fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
         .collect::<Vec<(String, String)>>()
 }
 
+/// The request headers as the kernel shape sees them: names lowercased,
+/// values raw bytes; the values of one name keep their receipt order, but
+/// the order across different names is not guaranteed, because hyper groups
+/// a header map by name. No logger prints these values; secret ones
+/// (`params::SECRET_HEADER_NAMES`) would never reach the log anyway.
+#[must_use]
+pub(crate) fn header_pairs(map: &http::HeaderMap) -> Vec<(String, Vec<u8>)> {
+    map.iter()
+        .map(|(name, value)| {
+            (
+                name.as_str().to_ascii_lowercase(),
+                value.as_bytes().to_vec(),
+            )
+        })
+        .collect()
+}
+
 /// The value of one header as raw bytes, from the kernel-shaped list.
 #[must_use]
 pub(crate) fn header_bytes(headers: &[(String, Vec<u8>)], name: &str) -> Option<Vec<u8>> {

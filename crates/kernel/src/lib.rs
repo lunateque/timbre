@@ -16,9 +16,18 @@
 //! - [`Secret`]: values that must never reach a log or a `Debug` dump;
 //! - [`Runtime`] with [`ThreadRuntime`]: where async work runs;
 //!   [`block_on`] drives one future on a thread without an executor crate;
-//! - [`http`], [`route`], [`page`], [`identity`], [`credential`] and
+//! - [`http`], [`route`], [`guard`], [`page`], [`identity`], [`credential`] and
 //!   [`migration`](crate::Migration): the shared shapes of requests, results,
 //!   who is asking, what they may do, and how a module evolves its stored data.
+//!
+//! Deny by default: every [`route`] carries a [`Guard`]; the edge hands the
+//! route match to [`Kernel::guarded`], which runs its check (extract,
+//! authenticate, permission) and answers with an opaque [`Authorized`] whose
+//! [`Authorized::run`](Authorized::run) is the only way to invoke a route
+//! handler, so a protocol edge can neither skip the guard nor call a handler
+//! it found on its own. The kernel names no wire protocol: a
+//! [`credential::SchemeName`] is an opaque owner key, and the kernel only
+//! routes by it and never interprets the fields that come with it.
 
 #![warn(missing_docs)]
 
@@ -28,6 +37,7 @@ pub mod credential;
 mod ctx;
 mod failure;
 mod future;
+pub mod guard;
 pub mod identity;
 mod jobs;
 mod log;
@@ -51,19 +61,21 @@ pub mod testing;
 pub use bus::{Handler, Signal};
 pub use command::{Command, CommandHandler};
 pub use credential::{
-    AuthOutcome, Credential, CredentialKind, CredentialProvider, RejectReason, Throttle, Verdict,
+    AuthOutcome, Credential, CredentialKind, CredentialProvider, RejectReason, SchemeName,
+    Throttle, Verdict,
 };
 pub use ctx::{Ctx, RequestId};
 pub use failure::{Failure, FailureCode, Fallible};
 pub use future::{BoxFuture, block_on};
-pub use identity::{Permission, PermissionEntry, Principal, UserId};
+pub use guard::{Authorized, Denial, Extraction, Guard};
+pub use identity::{Identity, Permission, PermissionEntry, Principal, UserId, UserName};
 pub use jobs::JobHandler;
 pub use log::{Clock, Format, Level, LogEvent, LogFilter, LogValue, Logger, Value};
 pub use migration::Migration;
 pub use page::{Cursor, Page};
 pub use port::{Port, Ports};
 pub use registry::{Kernel, Registry};
-pub use route::{RouteHandler, RouteMatch};
+pub use route::{Matched, RouteHandler, RouteMatch};
 pub use runtime::{Runtime, ThreadRuntime};
 pub use secret::{REDACTED, Secret};
 
@@ -79,5 +91,10 @@ mod tests {
         assert_send_sync::<Ctx>();
         assert_send_sync::<Logger>();
         assert_send_sync::<ThreadRuntime>();
+        // The HTTP edge borrows the request across the guard's authentication
+        // await inside a spawned future, so `&Request` must be `Send`: the
+        // streamed body is the only field that could lose that.
+        assert_send_sync::<crate::http::Request>();
+        assert_send_sync::<crate::http::Response>();
     }
 }

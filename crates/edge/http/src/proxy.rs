@@ -117,7 +117,12 @@ pub(crate) fn forwarded_for(headers: &[(String, Vec<u8>)]) -> Option<String> {
 ///
 /// The rightmost address of the list that is not itself trusted wins: the
 /// left part of the header is client-controlled, so only the entry this
-/// trusted proxy appended is dependable.
+/// trusted proxy appended is dependable. A hop that does not parse as an
+/// address at all (a proxy appending `unknown`, as some configurations do)
+/// stops the scan and the peer is used: past an entry the trusted proxy
+/// could not name, nothing further left is dependable either, and falling
+/// back to the peer - the one address the transport vouches for - beats
+/// believing a possibly forged left part.
 #[must_use]
 pub(crate) fn client_address(peer: IpAddr, forwarded: Option<&str>, trusted: &[Trusted]) -> IpAddr {
     if !trusted.iter().any(|proxy| proxy.contains(peer)) {
@@ -132,9 +137,12 @@ pub(crate) fn client_address(peer: IpAddr, forwarded: Option<&str>, trusted: &[T
         .filter(|entry| !entry.is_empty())
         .collect();
     for hop in hops.iter().rev() {
-        if let Ok(address) = hop.parse::<IpAddr>()
-            && !trusted.iter().any(|proxy| proxy.contains(address))
-        {
+        let Ok(address) = hop.parse::<IpAddr>() else {
+            // The first hop that does not name an address is the trusted
+            // proxy's own "unknown": nothing left of it is verifiable.
+            return peer;
+        };
+        if !trusted.iter().any(|proxy| proxy.contains(address)) {
             return address;
         }
     }
@@ -184,6 +192,38 @@ mod tests {
         assert_eq!(
             client_address(peer, Some("10.0.0.2, 10.0.0.3"), &trusted),
             peer
+        );
+    }
+
+    #[test]
+    fn an_unknown_hop_stops_the_scan_and_uses_the_peer() {
+        let trusted = trust(&["10.0.0.1"]);
+        let peer = "10.0.0.1".parse().expect("an address");
+        assert_eq!(
+            client_address(peer, Some("203.0.113.9, unknown"), &trusted),
+            peer,
+            "the proxy could not name the client; the peer is the only address left"
+        );
+        assert_eq!(
+            client_address(peer, Some("198.51.100.1, unknown, 203.0.113.9"), &trusted),
+            "203.0.113.9"
+                .parse::<std::net::IpAddr>()
+                .expect("an address"),
+            "the unknown sits left of the appended hop, so the scan still finds it"
+        );
+    }
+
+    #[test]
+    fn a_forged_left_hop_does_not_beat_a_stopped_scan() {
+        // The client forged `9.9.9.9` into its own header; the trusted proxy
+        // appended the real (unresolvable) hop. Believing the forged text
+        // would blame an innocent address for what the peer did.
+        let trusted = trust(&["10.0.0.1"]);
+        let peer = "10.0.0.1".parse().expect("an address");
+        assert_eq!(
+            client_address(peer, Some("9.9.9.9, unknown"), &trusted),
+            peer,
+            "a client-forged left hop never survives the unknown stop"
         );
     }
 

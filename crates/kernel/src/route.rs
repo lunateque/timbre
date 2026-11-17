@@ -4,6 +4,7 @@ use crate::ctx::Ctx;
 use crate::failure::Fallible;
 use crate::failures::KernelFailure;
 use crate::future::BoxFuture;
+use crate::guard::Guard;
 use crate::http::{Method, Request, Response};
 use crate::names;
 
@@ -21,22 +22,49 @@ enum Segment {
 struct Entry {
     segments: Vec<Segment>,
     method: Method,
+    guard: Guard,
     handler: RouteHandler,
 }
 
-/// What the route table knows about one request path.
+/// One route the table matched to a request, with everything the edge may
+/// see about it. The handler itself is private: only
+/// [`Kernel::guarded`](crate::Kernel::guarded) can turn this match into an
+/// [`Authorized`](crate::Authorized), and only
+/// [`Authorized::run`](crate::Authorized::run) can invoke the handler, so no
+/// call site can reach a handler around its guard.
 // No `PartialEq`: comparing `RouteHandler` function pointers is unreliable
-// across codegen units, so callers match on the variant and run the handler.
+// across codegen units, so callers never see one.
+#[derive(Clone, Debug)]
+pub struct Matched {
+    guard: Guard,
+    param: Option<String>,
+    handler: RouteHandler,
+}
+
+impl Matched {
+    /// The guard the kernel must run before the handler; every route has one,
+    /// because a route without a declared guard cannot register.
+    #[must_use]
+    pub fn guard(&self) -> Guard {
+        self.guard
+    }
+
+    /// The captured trailing segment, if the pattern ends in `{name}`.
+    #[must_use]
+    pub fn param(&self) -> Option<&str> {
+        self.param.as_deref()
+    }
+
+    pub(crate) fn handler(&self) -> RouteHandler {
+        self.handler
+    }
+}
+
+/// What the route table knows about one request path.
 #[derive(Clone, Debug)]
 pub enum RouteMatch {
-    /// A route answers this method and path; `param` carries the value of a
-    /// `{name}` capture, when the pattern has one.
-    Found {
-        /// The handler to run.
-        handler: RouteHandler,
-        /// The captured trailing segment, if the pattern ends in `{name}`.
-        param: Option<String>,
-    },
+    /// A route answers this method and path.
+    Found(Matched),
     /// The path has routes, but none for this method (the HTTP edge answers 405).
     MethodNotAllowed,
     /// No route has this path (the HTTP edge answers 404).
@@ -54,6 +82,7 @@ impl RouteTable {
         &mut self,
         method: Method,
         pattern: &'static str,
+        guard: Guard,
         handler: RouteHandler,
     ) -> Fallible {
         let Some(segments) = parse(pattern) else {
@@ -72,6 +101,7 @@ impl RouteTable {
         self.entries.push(Entry {
             segments,
             method,
+            guard,
             handler,
         });
         Ok(())
@@ -132,10 +162,11 @@ fn match_entry(entry: &Entry, parts: &[&str]) -> Option<RouteMatch> {
         .then(|| parts.get(literals))
         .flatten()
         .map(|captured| (*captured).to_owned());
-    Some(RouteMatch::Found {
-        handler: entry.handler,
+    Some(RouteMatch::Found(Matched {
+        guard: entry.guard,
         param,
-    })
+        handler: entry.handler,
+    }))
 }
 
 /// Split a pattern into segments, `None` when malformed: it must start with
@@ -183,11 +214,11 @@ mod tests {
         Box::pin(async { Ok(Response::new(200).with_body(Body::text("beta"))) })
     }
 
-    fn table(patterns: &[(Method, &'static str, RouteHandler)]) -> RouteTable {
+    fn table(patterns: &[(Method, &'static str, Guard, RouteHandler)]) -> RouteTable {
         let mut table = RouteTable::default();
-        for (method, pattern, handler) in patterns {
+        for (method, pattern, guard, handler) in patterns {
             table
-                .add(*method, pattern, *handler)
+                .add(*method, pattern, *guard, *handler)
                 .unwrap_or_else(|_| panic!("pattern {pattern} must register"));
         }
         table
@@ -195,7 +226,8 @@ mod tests {
 
     fn answer(table: &RouteTable, method: Method, path: &str) -> (String, Option<String>) {
         match table.find(method, path) {
-            RouteMatch::Found { handler, param } => {
+            RouteMatch::Found(found) => {
+                let handler = found.handler();
                 let kernel = RegistryStub::kernel();
                 let request = Request {
                     method,
@@ -209,7 +241,7 @@ mod tests {
                 };
                 let response = block_on(handler(Ctx::root(&kernel), request)).expect("handler ok");
                 let bytes = response.body.as_bytes().expect("in-memory body").to_vec();
-                (String::from_utf8(bytes).expect("utf-8 marker"), param)
+                (String::from_utf8(bytes).expect("utf-8 marker"), found.param)
             }
             RouteMatch::MethodNotAllowed => ("405".to_owned(), None),
             RouteMatch::NotFound => ("404".to_owned(), None),
@@ -236,8 +268,8 @@ mod tests {
     #[test]
     fn literal_routes_match_and_captures_return_their_segment() {
         let table = table(&[
-            (Method::Get, "/hello", alpha),
-            (Method::Get, "/rest/{method}", beta),
+            (Method::Get, "/hello", Guard::Public, alpha),
+            (Method::Get, "/rest/{method}", Guard::Public, beta),
         ]);
         assert_eq!(
             answer(&table, Method::Get, "/hello"),
@@ -253,8 +285,8 @@ mod tests {
     fn a_literal_wins_over_a_capture_at_the_same_depth() {
         // Registered later, so first-match-by-order would pick the capture.
         let table = table(&[
-            (Method::Get, "/rest/{method}", beta),
-            (Method::Get, "/rest/ping", alpha),
+            (Method::Get, "/rest/{method}", Guard::Public, beta),
+            (Method::Get, "/rest/ping", Guard::Public, alpha),
         ]);
         assert_eq!(
             answer(&table, Method::Get, "/rest/ping"),
@@ -264,7 +296,7 @@ mod tests {
 
     #[test]
     fn other_methods_and_paths_answer_405_and_404() {
-        let table = table(&[(Method::Get, "/hello", alpha)]);
+        let table = table(&[(Method::Get, "/hello", Guard::Public, alpha)]);
         assert_eq!(
             answer(&table, Method::Post, "/hello"),
             ("405".to_owned(), None)
@@ -282,14 +314,16 @@ mod tests {
     #[test]
     fn a_duplicate_route_is_taken_and_a_malformed_pattern_is_invalid() {
         let mut table = RouteTable::default();
-        table.add(Method::Get, "/hello", alpha).expect("first");
+        table
+            .add(Method::Get, "/hello", Guard::Public, alpha)
+            .expect("first");
         let duplicate = table
-            .add(Method::Get, "/hello", beta)
+            .add(Method::Get, "/hello", Guard::Public, beta)
             .expect_err("the same method and pattern twice");
         assert_eq!(duplicate.code(), crate::failures::ROUTE_TAKEN);
         // Another method on the same pattern is a different route.
         table
-            .add(Method::Post, "/hello", beta)
+            .add(Method::Post, "/hello", Guard::Public, beta)
             .expect("other method");
         let bad: [&'static str; 6] = [
             "hello",
@@ -301,7 +335,7 @@ mod tests {
         ];
         for pattern in bad {
             let error = table
-                .add(Method::Get, pattern, alpha)
+                .add(Method::Get, pattern, Guard::Public, alpha)
                 .expect_err("malformed pattern");
             assert_eq!(
                 error.code(),

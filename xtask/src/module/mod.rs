@@ -132,7 +132,9 @@ pub(crate) fn render_modules(ids: &[String]) -> String {
     for id in ids {
         text.push_str("    #[cfg(feature = \"");
         text.push_str(id);
-        text.push_str("\")]\n    let registry = registry.module(timbre_");
+        text.push_str("\")]\n    let registry = registry.module(\"");
+        text.push_str(id);
+        text.push_str("\", timbre_");
         text.push_str(id);
         text.push_str("::register)?;\n");
     }
@@ -256,7 +258,7 @@ mod tests {
              pub(crate) fn registry() -> Fallible<Registry> {\n\
             \x20   let registry = Registry::new();\n\
             \x20   #[cfg(feature = \"hello\")]\n\
-            \x20   let registry = registry.module(timbre_hello::register)?;\n\
+            \x20   let registry = registry.module(\"hello\", timbre_hello::register)?;\n\
             \x20   Ok(registry)\n\
              }\n"
         );
@@ -282,9 +284,9 @@ mod tests {
              pub(crate) fn registry() -> Fallible<Registry> {\n\
             \x20   let registry = Registry::new();\n\
             \x20   #[cfg(feature = \"a\")]\n\
-            \x20   let registry = registry.module(timbre_a::register)?;\n\
+            \x20   let registry = registry.module(\"a\", timbre_a::register)?;\n\
             \x20   #[cfg(feature = \"b\")]\n\
-            \x20   let registry = registry.module(timbre_b::register)?;\n\
+            \x20   let registry = registry.module(\"b\", timbre_b::register)?;\n\
             \x20   Ok(registry)\n\
              }\n"
         );

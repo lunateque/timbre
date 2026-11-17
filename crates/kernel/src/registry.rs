@@ -3,9 +3,12 @@
 
 use crate::bus::{Bus, Handler, Signal};
 use crate::command::{Command, CommandHandler, CommandTable};
-use crate::credential::{CredentialKind, CredentialProvider, CredentialTable};
+use crate::credential::{
+    CredentialKind, CredentialProvider, CredentialTable, Throttle, owner_label,
+};
 use crate::failure::Fallible;
 use crate::failures::KernelFailure;
+use crate::guard::Guard;
 use crate::identity::{Permission, PermissionEntry};
 use crate::jobs::{JobHandler, JobTable, JobTracker};
 use crate::log::Logger;
@@ -27,6 +30,7 @@ pub struct Kernel {
     running_jobs: JobTracker,
     permissions: Vec<PermissionEntry>,
     credentials: CredentialTable,
+    throttle: Option<Arc<dyn Throttle>>,
     migrations: Vec<Migration>,
     commands: CommandTable,
 }
@@ -58,6 +62,11 @@ impl Kernel {
         kind: CredentialKind,
     ) -> Option<&Arc<dyn CredentialProvider>> {
         self.credentials.get(kind)
+    }
+
+    /// The registered brute-force limiter, if a module provided one.
+    pub(crate) fn throttle(&self) -> Option<&Arc<dyn Throttle>> {
+        self.throttle.as_ref()
     }
 
     /// Start every registered job on the runtime, logging each job's start,
@@ -121,8 +130,14 @@ pub struct Registry {
     jobs: JobTable,
     permissions: Vec<PermissionEntry>,
     credentials: CredentialTable,
+    throttle: Option<Arc<dyn Throttle>>,
+    throttle_owner: Option<&'static str>,
     migrations: Vec<Migration>,
     commands: CommandTable,
+    /// The module whose registration step is running right now, named by
+    /// `Registry::module`; owners of credential kinds and of the throttle are
+    /// attributed to it so a clash can name both modules.
+    registering: Option<&'static str>,
 }
 
 impl Registry {
@@ -131,13 +146,40 @@ impl Registry {
         Self::default()
     }
 
-    /// Run one module's registration step. A failing step fails startup.
+    /// Run one module's registration step under the module id `id`: one
+    /// lowercase name segment, given explicitly because the type of the
+    /// function behind `register` says nothing dependable about who wrote
+    /// it. `kernel`, `timbre` and `xtask` are reserved: they name the kernel
+    /// itself, the binary and the tooling, so no module may claim their
+    /// prefixes. A failing step fails startup. Owners installed during the
+    /// step (credential providers, the throttle) are attributed to `id` by
+    /// name when a later registration clashes with them.
     ///
     /// # Errors
     ///
-    /// Propagates whatever the module returns.
-    pub fn module(mut self, register: fn(&mut Registry) -> Fallible) -> Fallible<Self> {
-        register(&mut self)?;
+    /// `kernel.module_invalid` for a malformed or reserved `id`; otherwise
+    /// propagates whatever the module returns.
+    pub fn module(
+        self,
+        id: &'static str,
+        register: impl FnOnce(&mut Self) -> Fallible,
+    ) -> Fallible<Self> {
+        if !crate::names::is_valid_segment(id) || matches!(id, "kernel" | "timbre" | "xtask") {
+            return Err(Box::new(KernelFailure::ModuleInvalid { id }));
+        }
+        self.step(Some(id), register)
+    }
+
+    fn step(
+        mut self,
+        id: Option<&'static str>,
+        register: impl FnOnce(&mut Self) -> Fallible,
+    ) -> Fallible<Self> {
+        let outer = self.registering;
+        self.registering = id;
+        let outcome = register(&mut self);
+        self.registering = outer;
+        outcome?;
         Ok(self)
     }
 
@@ -156,7 +198,9 @@ impl Registry {
     }
 
     /// Bind `handler` to `method` on `pattern`: literal segments and one
-    /// optional trailing `{name}` capture.
+    /// optional trailing `{name}` capture. `guard` is mandatory: the kernel
+    /// authenticates and checks it before the handler runs, so a route that
+    /// declares no access rule cannot exist.
     ///
     /// # Errors
     ///
@@ -166,9 +210,10 @@ impl Registry {
         &mut self,
         method: crate::http::Method,
         pattern: &'static str,
+        guard: Guard,
         handler: RouteHandler,
     ) -> Fallible {
-        self.routes.add(method, pattern, handler)
+        self.routes.add(method, pattern, guard, handler)
     }
 
     /// Declare a background job, started after `Started` is published.
@@ -203,7 +248,11 @@ impl Registry {
         Ok(())
     }
 
-    /// Declare the single owner of credential kind `kind`.
+    /// Declare the single owner of credential kind `kind`. Kinds and scheme
+    /// names share one table: `CredentialKind::Scheme` is keyed by its name,
+    /// so a second owner of the same scheme clashes the same way a second
+    /// owner of `ApiKey` does, and the refusal names both registering
+    /// modules.
     ///
     /// # Errors
     ///
@@ -213,7 +262,26 @@ impl Registry {
         kind: CredentialKind,
         provider: Arc<dyn CredentialProvider>,
     ) -> Fallible {
-        self.credentials.add(kind, provider)
+        self.credentials.add(kind, provider, self.registering)
+    }
+
+    /// Declare the single brute-force limiter consulted before every
+    /// credential check. It is a kernel-owned service, not a port: exactly
+    /// one may exist and only the kernel calls it.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.throttle_taken` when a throttle is already registered.
+    pub fn throttle(&mut self, throttle: Arc<dyn Throttle>) -> Fallible {
+        if self.throttle.is_some() {
+            return Err(Box::new(KernelFailure::ThrottleTaken {
+                first: owner_label(self.throttle_owner),
+                second: owner_label(self.registering),
+            }));
+        }
+        self.throttle_owner = self.registering;
+        self.throttle = Some(throttle);
+        Ok(())
     }
 
     /// Ship one migration step of `module`; versions apply ascending, all of a
@@ -280,6 +348,7 @@ impl Registry {
             running_jobs: JobTracker::new(),
             permissions: self.permissions,
             credentials: self.credentials,
+            throttle: self.throttle,
             migrations: self.migrations,
             commands: self.commands,
         })

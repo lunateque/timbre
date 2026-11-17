@@ -14,6 +14,6 @@ use timbre_kernel::{Fallible, Registry};
 pub(crate) fn registry() -> Fallible<Registry> {
     let registry = Registry::new();
     #[cfg(feature = "hello")]
-    let registry = registry.module(timbre_hello::register)?;
+    let registry = registry.module("hello", timbre_hello::register)?;
     Ok(registry)
 }

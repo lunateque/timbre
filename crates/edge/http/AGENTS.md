@@ -6,9 +6,32 @@ The HTTP server: `serve` binds every configured address, speaks HTTP/1.1
 and HTTP/2 cleartext through hyper, turns each request into the kernel's
 `Request` (percent-decoded, RFC 3986 dot-normalized path, merged form
 fields, the client address resolved through `trusted_proxies`, a request
-id for log correlation only), routes it, runs the handler under
-`ctx.with_request`/`with_client`, streams the `Response` back and logs
-every request. The `http.request` log line never carries a secret: a
+id for log correlation only), routes it, runs the route's `Guard` through
+`Kernel::guarded` under `ctx.with_request` before the handler may run,
+streams the `Response` back and logs every request. The route is looked up
+before a single body byte is buffered: 404/405 answers never read the
+body, and a `Guard::Requires` route whose credential rides the headers
+runs its check first too - a denied request is refused without the body
+being held in memory, so a bogus credential pointed at a large body costs
+the server nothing beyond the socket drain hyper does after the answer.
+The exceptions: a `application/x-www-form-urlencoded` POST (its credential
+may travel in the body, so the body is read and merged first, under the
+same `max_body_bytes`/`body_read_timeout` limits) and public routes (no
+check worth running ahead of the body). The guard check itself is bounded
+by `guard_timeout`: an unanswered check answers 504, logs
+`http.guard_timeout` with the code, and drops the check's late outcome;
+the handler never runs. A
+`Guard::Requires` route whose check fails is answered with the protocol's
+own `deny` response exactly like any handler reply - framing headers
+stripped, the `http.request` line logs its status - and the handler never
+runs; a passed check hands the handler the context carrying the sealed
+principal, and the `http.request` line gains `user` (the canonical,
+never-secret user name) when the request carries one. A denial names no
+user: `Kernel::guarded` hands the edge only the rendered `deny` response,
+never the `Denial` or the identity behind it, so even a 403 line stays
+nameless (the kernel's own `kernel.access_denied` audit line carries the
+user). The
+`http.request` log line never carries a secret: a
 query or form value logs as `***` when its lowercased key contains
 `token`, `key`, `secret`, `pass`, `auth`, `cookie`, `session` or `sid` or
 is exactly `p`, `t`, `s`, `code` or `pwd`, every logged value is clipped
@@ -16,7 +39,10 @@ to 120 bytes and the whole logged target to 2 KiB, and no header value is
 logged at all - `SECRET_HEADER_NAMES` lists the ones that must stay out
 of any future line too. A `X-Forwarded-For` arriving as several header
 lines is joined into one list, wire order, before the rightmost-untrusted
-rule runs. The kernel `Response`'s framing headers (`content-length`,
+rule runs; scanning right to left, a hop that does not parse as an address
+(a proxy appending `unknown`) stops the scan and the peer is used, so a
+client-forged left hop is never blamed for what the peer did. The kernel
+`Response`'s framing headers (`content-length`,
 `transfer-encoding`, `connection`, `keep-alive`, `upgrade`) are dropped
 so hyper derives them from the body it serves. Limits: a configurable
 header-read timeout (10 s by default) that also bounds protocol
@@ -25,8 +51,10 @@ it and releases its slot - and detection parks between peeks of an
 undecided prefix instead of spinning on the still-unread byte; a
 configurable handler deadline (60 s default, 504 on expiry) that bounds
 the time until the handler returns its response but never a streaming
-body, so long downloads run on; 16 KiB of headers (h1 byte cap and
-header count, h2 header list size), a configurable body cap (413 above
+body, so long downloads run on; a configurable guard deadline (10 s
+default, 504 on expiry) that bounds the route's guard check; 16 KiB of
+headers (h1 byte cap and header count, h2 header list size), a
+configurable body cap (413 above
 it), a configurable cap of query+form pairs (1024 by default; URL
 overflow 414, key overflow 431, form overflow 413, each logged), a 30 s
 configurable body read timeout (408 on expiry), at most 1024 concurrent
@@ -39,6 +67,7 @@ fails mid-flight cannot change the head any more; the failure logs as
 The `[http]` config section is owned here: `HttpConfig::from_config`
 reads it through `timbre-edge-config` (keys `listen`, `trusted_proxies`,
 `max_body_bytes`, `header_read_timeout_ms`, `handler_timeout_ms`,
+`guard_timeout_ms`,
 `body_read_timeout_ms`, `max_param_pairs`, each with the default of
 `HttpConfig::default`; unknown keys fail with `config.invalid`), applies
 `TIMBRE_HTTP__<KEY>` environment overrides, and converts the millisecond
@@ -63,15 +92,19 @@ with the `http.request` summary.
   reported as the number it got).
 - `http.request` (`REQUEST`, info): one request answered; fields `method`,
   `path` (the logged target: secret query/form values redacted, clipped),
-  `status`, `bytes` (the body's size when known), `ms` (whole milliseconds
-  since the request arrived), `client` (the address resolved through
-  `trusted_proxies`).
+  `status` (a guard's deny response included: the route's refusal status,
+  not a kernel error), `bytes` (the body's size when known), `ms` (whole
+  milliseconds since the request arrived), `client` (the address resolved
+  through `trusted_proxies`), and `user` - the authenticated canonical
+  user name - only when the request passed a `Guard::Requires` check
+  (a denial carries no name: `Kernel::guarded` returns only the rendered
+  `deny` response, so even a 403 line stays nameless).
 - `http.handler_failed` (`HANDLER_FAILED`, warn): the route handler
   returned a failure; fields `code` (the failure's code), `status` (the
   status answered).
 - `http.params_refused` (`PARAMS_REFUSED`, warn): the query or form broke
-  a parameter limit and the request was refused before routing; fields
-  `source` (`url` or `form`), `reason` (`key_too_long` or
+  a parameter limit and the request was refused before the guard and the
+  handler; fields `source` (`url` or `form`), `reason` (`key_too_long` or
   `too_many_pairs`), `pairs` (how many arrived).
 - `http.body_failed` (`BODY_FAILED`, warn): the request body stream errored
   while being read; field `code` (`http.body_failed`).
@@ -81,6 +114,10 @@ with the `http.request` summary.
   running when `handler_timeout` expired; fields `code`
   (`http.handler_timeout`), `ms` (the configured timeout in whole
   milliseconds).
+- `http.guard_timeout` (`GUARD_TIMEOUT`, warn): the route's guard check
+  was still running when `guard_timeout` expired; the client is answered
+  504; fields `code` (`http.guard_timeout`), `ms` (the configured timeout
+  in whole milliseconds).
 - `http.stream_failed` (`STREAM_FAILED`, warn): a streaming response body
   failed after its head was sent; field `code` (the producing failure's
   code).
@@ -97,6 +134,9 @@ with the `http.request` summary.
   arrived slower than `body_read_timeout`; the wire answer is 408.
 - `http.handler_timeout` (`HttpFailure::HandlerTimeout`): the handler was
   still running when `handler_timeout` expired; the wire answer is 504.
+- `http.guard_timeout` (`HttpFailure::GuardTimeout`): the guard check was
+  still running when `guard_timeout` expired; the wire answer is 504 and
+  the check's late outcome is dropped.
 
 ## Kernel contract notes
 

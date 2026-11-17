@@ -26,6 +26,10 @@ pub struct HttpConfig {
     /// answered 504. A streaming response body is not bounded by it, so a
     /// long download keeps running past the deadline.
     pub handler_timeout: Duration,
+    /// How long a route's guard check (credential extraction, provider
+    /// authentication, permission test) may take; slower is answered 504 and
+    /// logged as `http.guard_timeout`.
+    pub guard_timeout: Duration,
     /// The largest number of query+form pairs one request may carry; more
     /// answers 414 (URL), 413 (form).
     pub max_param_pairs: usize,
@@ -40,6 +44,7 @@ impl Default for HttpConfig {
             body_read_timeout: Duration::from_secs(30),
             header_read_timeout: Duration::from_secs(10),
             handler_timeout: Duration::from_secs(60),
+            guard_timeout: Duration::from_secs(10),
             max_param_pairs: 1024,
         }
     }
@@ -60,6 +65,8 @@ pub(crate) struct HttpSection {
     pub header_read_timeout_ms: Option<u64>,
     /// The handler deadline, in milliseconds.
     pub handler_timeout_ms: Option<u64>,
+    /// The guard-check deadline, in milliseconds.
+    pub guard_timeout_ms: Option<u64>,
     /// The body-read timeout, in milliseconds.
     pub body_read_timeout_ms: Option<u64>,
     /// The cap of query+form pairs.
@@ -91,6 +98,7 @@ impl HttpConfig {
                 defaults.header_read_timeout,
             ),
             handler_timeout: milliseconds(section.handler_timeout_ms, defaults.handler_timeout),
+            guard_timeout: milliseconds(section.guard_timeout_ms, defaults.guard_timeout),
             max_param_pairs: section.max_param_pairs.unwrap_or(defaults.max_param_pairs),
         })
     }
@@ -137,9 +145,12 @@ mod tests {
 
     #[test]
     fn a_timeout_from_the_file_reaches_the_config() {
-        let file = File::with("[http]\nhandler_timeout_ms = 250\nmax_param_pairs = 7\n");
+        let file = File::with(
+            "[http]\nhandler_timeout_ms = 250\nguard_timeout_ms = 40\nmax_param_pairs = 7\n",
+        );
         let http = HttpConfig::from_config(&file.config()).expect("the section parses");
         assert_eq!(http.handler_timeout, Duration::from_millis(250));
+        assert_eq!(http.guard_timeout, Duration::from_millis(40));
         assert_eq!(http.max_param_pairs, 7);
         assert_eq!(
             http.body_read_timeout,
@@ -147,6 +158,15 @@ mod tests {
             "absent keys keep their defaults"
         );
         assert_eq!(http.listen, HttpConfig::default().listen);
+    }
+
+    #[test]
+    fn the_guard_deadline_defaults_to_ten_seconds() {
+        assert_eq!(
+            HttpConfig::default().guard_timeout,
+            Duration::from_secs(10),
+            "a guard that hangs must answer 504, not hold the request open"
+        );
     }
 
     #[test]

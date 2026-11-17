@@ -9,21 +9,33 @@ pub mod log_events;
 use log_events::GREETED;
 use timbre_kernel::http::{Body, Method, Request, Response};
 use timbre_kernel::signals::Started;
-use timbre_kernel::{BoxFuture, Ctx, Fallible, Permission, Registry, log};
+use timbre_kernel::{
+    BoxFuture, Credential, Ctx, Denial, Extraction, Fallible, Guard, Permission, Registry, Secret,
+    log,
+};
 
-/// The permission `hello` declares for granting; the check that enforces it
-/// lands with route guards.
+/// The permission `hello` declares for granting; guarded routes name it.
 pub const GREET: Permission = Permission::new("hello.greet");
 
-/// Register the module: one handler for `Started`, a route, a command and a
-/// declared permission.
+/// Register the module: one handler for `Started`, two routes, a command and
+/// a declared permission.
 ///
 /// # Errors
 ///
 /// Propagates the kernel's refusal of a duplicate registration.
 pub fn register(registry: &mut Registry) -> Fallible {
     registry.on::<Started>(greet);
-    registry.route(Method::Get, "/hello", hello_route)?;
+    registry.route(Method::Get, "/hello", Guard::Public, hello_route)?;
+    registry.route(
+        Method::Get,
+        "/hello/me",
+        Guard::Requires {
+            permission: GREET,
+            extract: extract_bearer,
+            deny: deny_plain,
+        },
+        me_route,
+    )?;
     registry.command(
         "hello",
         "print the greeting through the logger",
@@ -54,6 +66,91 @@ fn hello_route(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
     })
 }
 
+/// The credential the request's `Authorization` lines carry. Exactly one line
+/// is read, `Bearer <secret>` with the scheme word case-insensitive and the
+/// secret trimmed of surrounding spaces. Any other scheme carries no bearer
+/// credential, so the guard answers `Missing` rather than guessing. Two lines,
+/// or one line whose secret holds a comma, offer several values at once: that
+/// is a conflict, since no bearer token contains a comma.
+fn extract_bearer(request: &Request) -> Extraction {
+    let lines: Vec<&[u8]> = request
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("authorization"))
+        .map(|(_, value)| value.as_slice())
+        .collect();
+    match lines.as_slice() {
+        [] => Extraction::None,
+        [line] => bearer_credential(line),
+        _ => Extraction::Conflict,
+    }
+}
+
+/// The bearer credential of one `Authorization` value; see [`extract_bearer`].
+fn bearer_credential(value: &[u8]) -> Extraction {
+    // A secret that is not UTF-8 is no token the server could have issued, so
+    // it is refused, not rewritten lossily into a string that might match one.
+    let Ok(text) = std::str::from_utf8(value) else {
+        return Extraction::None;
+    };
+    let Some((scheme, secret)) = text.split_once(' ') else {
+        return Extraction::None;
+    };
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Extraction::None;
+    }
+    let secret = secret.trim();
+    if secret.is_empty() {
+        return Extraction::None;
+    }
+    if secret.contains(',') {
+        return Extraction::Conflict;
+    }
+    Extraction::One(Credential::Bearer(Secret::new(secret.to_owned())))
+}
+
+/// The plain-text answer to a denial: 401 when the caller offered nothing the
+/// server accepts (missing, rejected, or a scheme no module owns), 429 when the
+/// throttle refused to ask, 403 for a recognized caller without `hello.greet`,
+/// and 400 when the request offers more than one credential.
+fn deny_plain(_: &Request, denial: Denial) -> Response {
+    let (status, text) = match denial {
+        Denial::Missing => (401, "this greeting needs a bearer token\n".to_owned()),
+        Denial::Rejected => (401, "the greeting did not accept that token\n".to_owned()),
+        Denial::Throttled => (429, "the greeting is asked for too fast\n".to_owned()),
+        Denial::Unsupported(_) => (401, "this server accepts no bearer tokens\n".to_owned()),
+        Denial::Forbidden(permission) => (
+            403,
+            format!("the caller does not hold {}\n", permission.as_str()),
+        ),
+        Denial::Conflict => (
+            400,
+            "the request offers more than one credential\n".to_owned(),
+        ),
+    };
+    Response::new(status)
+        .with_header("content-type", b"text/plain; charset=utf-8")
+        .with_body(Body::text(&text))
+}
+
+/// `GET /hello/me`: guarded by `hello.greet`, so the guard has established a
+/// principal, and that user is greeted by name.
+fn me_route(ctx: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async move { greet_principal(&ctx) })
+}
+
+/// Greet the principal the guard established. A route whose guard passed
+/// always has one; if it does not, the guard flow is broken and the request
+/// fails rather than greeting a name hello made up.
+fn greet_principal(ctx: &Ctx) -> Fallible<Response> {
+    let Some(principal) = ctx.principal() else {
+        return Err(Box::new(failures::HelloFailure::PrincipalMissing));
+    };
+    Ok(Response::new(200)
+        .with_header("content-type", b"text/plain; charset=utf-8")
+        .with_body(Body::text(&format!("hello, {}\n", principal.user()))))
+}
+
 /// `timbre hello`: greets through the logger, like the `Started` handler.
 fn run_command(ctx: Ctx, _: Vec<String>) -> BoxFuture<Fallible> {
     Box::pin(async move {
@@ -63,102 +160,4 @@ fn run_command(ctx: Ctx, _: Vec<String>) -> BoxFuture<Fallible> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-    use std::sync::Arc;
-    use timbre_kernel::testing::{Shared, epoch};
-    use timbre_kernel::{Format, Kernel, LogFilter, Logger, RouteMatch, ThreadRuntime, block_on};
-
-    fn finished(sink: Shared) -> Arc<Kernel> {
-        let registry = Registry::new().module(register).expect("hello registers");
-        registry.finish(
-            Logger::new(LogFilter::default(), Format::Json, Box::new(sink), epoch),
-            Arc::new(ThreadRuntime::new()),
-        )
-    }
-
-    #[test]
-    fn started_publishes_one_greeting_line() {
-        let sink = Shared::default();
-        let kernel = finished(sink.clone());
-        Ctx::root(&kernel).publish(&Started);
-        // Dropping the last kernel joins the log writer, so every line has reached the sink.
-        drop(kernel);
-        assert_eq!(
-            sink.text(),
-            "{\"ts\":\"1970-01-01T00:00:00.000Z\",\"level\":\"info\",\"event\":\"hello.greeted\",\"greeting\":\"hello\"}\n"
-        );
-    }
-
-    fn request(method: Method, path: &str) -> Request {
-        Request {
-            method,
-            path: path.to_owned(),
-            param: None,
-            query: Vec::new(),
-            headers: Vec::new(),
-            peer: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4533),
-            client: IpAddr::V4(Ipv4Addr::LOCALHOST),
-            body: Body::Empty,
-        }
-    }
-
-    #[test]
-    fn the_route_answers_200_hello() {
-        let kernel = finished(Shared::default());
-        let ctx = Ctx::root(&kernel);
-        let found = match kernel.find_route(Method::Get, "/hello") {
-            RouteMatch::Found { handler, param } => {
-                assert_eq!(param, None);
-                handler
-            }
-            other => panic!("expected a found route, got {other:?}"),
-        };
-        let response =
-            block_on(found(ctx, request(Method::Get, "/hello"))).expect("the route answers");
-        assert_eq!(response.status, 200);
-        assert_eq!(
-            response.header("content-type"),
-            Some(b"text/plain; charset=utf-8".as_slice())
-        );
-        assert_eq!(response.body.as_bytes(), Some(&b"hello"[..]));
-        // The route does not answer other paths or methods.
-        assert!(matches!(
-            kernel.find_route(Method::Post, "/hello"),
-            RouteMatch::MethodNotAllowed
-        ));
-        assert!(matches!(
-            kernel.find_route(Method::Get, "/goodbye"),
-            RouteMatch::NotFound
-        ));
-    }
-
-    #[test]
-    fn the_command_greets_through_the_logger() {
-        let sink = Shared::default();
-        let kernel = finished(sink.clone());
-        let ctx = Ctx::root(&kernel);
-        let (handler, rest) = kernel
-            .find_command(&["hello".to_owned()])
-            .expect("the hello command is registered");
-        assert!(rest.is_empty(), "no words follow the command name");
-        block_on(handler(ctx, rest)).expect("the command succeeds");
-        drop(kernel);
-        assert_eq!(
-            sink.text(),
-            "{\"ts\":\"1970-01-01T00:00:00.000Z\",\"level\":\"info\",\"event\":\"hello.greeted\",\"greeting\":\"hello\"}\n"
-        );
-    }
-
-    #[test]
-    fn the_permission_is_declared_for_granting() {
-        let kernel = finished(Shared::default());
-        let declared: Vec<Permission> = kernel
-            .permissions()
-            .iter()
-            .map(|entry| entry.permission)
-            .collect();
-        assert_eq!(declared, [GREET]);
-    }
-}
+mod tests;

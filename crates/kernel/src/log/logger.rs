@@ -96,6 +96,33 @@ impl Logger {
         if !self.enabled(level, event.module()) {
             return;
         }
+        self.write_unfiltered(request, level, event, fields);
+    }
+
+    /// Write one line at `warn` or `error` regardless of the filter, for the
+    /// audit lines a running deployment must never lose to its log level
+    /// (`kernel.auth_failed`, `kernel.access_denied`): security monitoring
+    /// reads these lines and a filter must not blind it. The dropped-lines
+    /// report is not written here; the log writer emits it from its own
+    /// thread.
+    pub(crate) fn write_always(
+        &self,
+        request: Option<RequestId>,
+        level: Level,
+        event: &LogEvent,
+        fields: &[(&'static str, &dyn LogValue)],
+    ) {
+        debug_assert!(level <= Level::Warn, "only urgent lines bypass the filter");
+        self.write_unfiltered(request, level, event, fields);
+    }
+
+    fn write_unfiltered(
+        &self,
+        request: Option<RequestId>,
+        level: Level,
+        event: &LogEvent,
+        fields: &[(&'static str, &dyn LogValue)],
+    ) {
         let line = render(self.format, (self.clock)(), level, event, request, fields);
         if level <= Level::Warn {
             if !write_line_bounded(&self.sink, &line, INLINE_SINK_WAIT) {

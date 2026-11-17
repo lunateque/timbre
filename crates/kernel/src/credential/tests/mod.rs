@@ -1,16 +1,23 @@
 use super::*;
 use crate::failures::CREDENTIAL_KIND_TAKEN;
-use crate::identity::UserId;
+use crate::identity::{Identity, UserName};
 use crate::log_events::AUTH_FAILED;
+use crate::port::Port;
 use crate::signals::AuthFailed;
 use crate::testing::{Shared, fixed};
 use crate::{Ctx, Format, Kernel, LogFilter, Logger, Registry, ThreadRuntime, block_on};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, PoisonError};
 
-fn principal() -> Principal {
-    Principal {
-        user: UserId::new("tester"),
+mod user_names;
+
+fn user(text: &str) -> UserName {
+    UserName::normalize(text).unwrap_or_else(|rejected| panic!("`{rejected}` is not canonical"))
+}
+
+fn identity() -> Identity {
+    Identity {
+        user: user("tester"),
         permissions: Vec::new(),
     }
 }
@@ -27,7 +34,7 @@ impl CredentialProvider for Stub {
         drop(asked);
         // The test verdicts are constant, so rebuilding one is cheap.
         let verdict = match &self.verdict {
-            Verdict::Recognized(_) => Verdict::Recognized(principal()),
+            Verdict::Recognized(_) => Verdict::Recognized(identity()),
             Verdict::Rejected(reason) => Verdict::Rejected(*reason),
         };
         Box::pin(async move { verdict })
@@ -62,10 +69,8 @@ impl Port for Log {}
 
 struct Deny;
 
-impl Port for Deny {}
-
 impl Throttle for Deny {
-    fn allow(&self, _client: IpAddr, _user: Option<&str>) -> bool {
+    fn allow(&self, _client: IpAddr, _user: Option<&UserName>) -> bool {
         false
     }
 }
@@ -80,7 +85,7 @@ fn remember(ctx: &Ctx, signal: &AuthFailed) -> crate::Fallible {
         journal.add(format!(
             "{}|{}|{}",
             signal.client,
-            signal.user.clone().unwrap_or_default(),
+            signal.user.as_ref().map_or("", UserName::as_str),
             signal.reason.as_str()
         ));
     }
@@ -96,6 +101,14 @@ struct Harness {
 
 impl Harness {
     fn build(provider: Option<(CredentialKind, Verdict)>, throttle: bool) -> Harness {
+        Harness::build_with_filter(provider, throttle, LogFilter::default())
+    }
+
+    fn build_with_filter(
+        provider: Option<(CredentialKind, Verdict)>,
+        throttle: bool,
+        filter: LogFilter,
+    ) -> Harness {
         let sink = Shared::default();
         let journal = Arc::new(Log::default());
         let asked = Arc::new(Mutex::new(0usize));
@@ -105,7 +118,7 @@ impl Harness {
             .expect("journal");
         if throttle {
             registry
-                .provide::<dyn Throttle>(Arc::new(Deny) as Arc<dyn Throttle>)
+                .throttle(Arc::new(Deny) as Arc<dyn Throttle>)
                 .expect("throttle");
         }
         if let Some((kind, verdict)) = provider {
@@ -121,12 +134,7 @@ impl Harness {
         }
         registry.on::<AuthFailed>(remember);
         let kernel = registry.finish(
-            Logger::new(
-                LogFilter::default(),
-                Format::Json,
-                Box::new(sink.clone()),
-                fixed,
-            ),
+            Logger::new(filter, Format::Json, Box::new(sink.clone()), fixed),
             Arc::new(ThreadRuntime::new()),
         );
         Harness {
@@ -138,7 +146,7 @@ impl Harness {
     }
 
     fn ctx(&self) -> Ctx {
-        Ctx::root(&self.kernel).with_client(IpAddr::V4(Ipv4Addr::LOCALHOST))
+        Ctx::root(&self.kernel)
     }
 
     fn asked_count(&self) -> usize {
@@ -146,18 +154,22 @@ impl Harness {
     }
 }
 
+fn client() -> IpAddr {
+    IpAddr::V4(Ipv4Addr::LOCALHOST)
+}
+
 #[test]
-fn a_recognized_credential_reaches_the_principal_and_stays_quiet() {
+fn a_recognized_credential_reaches_the_identity_and_stays_quiet() {
     let harness = Harness::build(
-        Some((CredentialKind::ApiKey, Verdict::Recognized(principal()))),
+        Some((CredentialKind::ApiKey, Verdict::Recognized(identity()))),
         false,
     );
     let outcome = block_on(
         harness
             .ctx()
-            .authenticate(Credential::ApiKey(Secret::new("k".to_owned()))),
+            .authenticate(Credential::ApiKey(Secret::new("k".to_owned())), client()),
     );
-    assert_eq!(outcome, AuthOutcome::Recognized(principal()));
+    assert_eq!(outcome, AuthOutcome::Recognized(identity()));
     assert_eq!(harness.asked_count(), 1, "the owner was asked");
     assert!(harness.journal.entries().is_empty(), "no signal on success");
     harness.kernel.logger().flush();
@@ -167,13 +179,13 @@ fn a_recognized_credential_reaches_the_principal_and_stays_quiet() {
 #[test]
 fn a_kind_without_an_owner_is_unsupported_and_no_provider_runs() {
     let harness = Harness::build(
-        Some((CredentialKind::ApiKey, Verdict::Recognized(principal()))),
+        Some((CredentialKind::ApiKey, Verdict::Recognized(identity()))),
         false,
     );
     let outcome = block_on(
         harness
             .ctx()
-            .authenticate(Credential::Bearer(Secret::new("t".to_owned()))),
+            .authenticate(Credential::Bearer(Secret::new("t".to_owned())), client()),
     );
     assert_eq!(outcome, AuthOutcome::Unsupported);
     assert_eq!(harness.asked_count(), 0, "the api key owner is not asked");
@@ -184,7 +196,7 @@ fn a_kind_without_an_owner_is_unsupported_and_no_provider_runs() {
 }
 
 #[test]
-fn a_second_owner_of_a_kind_is_refused() {
+fn a_second_owner_of_a_kind_is_refused_naming_both_modules() {
     let stub = || {
         Arc::new(Stub {
             verdict: Verdict::Rejected(RejectReason::Invalid),
@@ -199,6 +211,13 @@ fn a_second_owner_of_a_kind_is_refused() {
         .credential_provider(CredentialKind::ApiKey, stub())
         .expect_err("a second owner must fail");
     assert_eq!(error.code(), CREDENTIAL_KIND_TAKEN);
+    // Outside a module registration both owners are "the binary"; a guarded
+    // registration naming real modules is covered in the guard tests.
+    let text = format!("{error:?}");
+    assert!(
+        text.contains("first") && text.contains("second"),
+        "the failure must carry both owners: {text}"
+    );
 }
 
 #[test]
@@ -210,10 +229,13 @@ fn a_rejection_publishes_its_detail_and_never_the_secret() {
         )),
         false,
     );
-    let outcome = block_on(harness.ctx().authenticate(Credential::Password {
-        user: "tester".to_owned(),
-        secret: Secret::new("sup3rs3cr3t".to_owned()),
-    }));
+    let outcome = block_on(harness.ctx().authenticate(
+        Credential::Password {
+            user: "tester".to_owned(),
+            secret: Secret::new("sup3rs3cr3t".to_owned()),
+        },
+        client(),
+    ));
     assert_eq!(outcome, AuthOutcome::Rejected(RejectReason::Invalid));
     assert_eq!(
         harness.journal.entries(),
@@ -237,13 +259,13 @@ fn a_rejection_publishes_its_detail_and_never_the_secret() {
 #[test]
 fn a_throttle_refuses_before_the_provider_is_asked() {
     let harness = Harness::build(
-        Some((CredentialKind::ApiKey, Verdict::Recognized(principal()))),
+        Some((CredentialKind::ApiKey, Verdict::Recognized(identity()))),
         true,
     );
     let outcome = block_on(
         harness
             .ctx()
-            .authenticate(Credential::ApiKey(Secret::new("k".to_owned()))),
+            .authenticate(Credential::ApiKey(Secret::new("k".to_owned())), client()),
     );
     assert_eq!(outcome, AuthOutcome::Rejected(RejectReason::Throttled));
     assert_eq!(harness.asked_count(), 0, "the provider was never asked");
@@ -251,5 +273,31 @@ fn a_throttle_refuses_before_the_provider_is_asked() {
         harness.journal.entries(),
         ["127.0.0.1||throttled"],
         "an unnamed credential still publishes the client"
+    );
+}
+
+#[test]
+fn an_auth_failure_is_logged_even_when_the_filter_hides_warn() {
+    let quiet = LogFilter::parse("error").expect("a valid filter");
+    let harness = Harness::build_with_filter(
+        Some((
+            CredentialKind::Password,
+            Verdict::Rejected(RejectReason::Invalid),
+        )),
+        false,
+        quiet,
+    );
+    let _ = block_on(harness.ctx().authenticate(
+        Credential::Password {
+            user: "tester".to_owned(),
+            secret: Secret::new("s".to_owned()),
+        },
+        client(),
+    ));
+    harness.kernel.logger().flush();
+    let line = harness.sink.text();
+    assert!(
+        line.contains(&format!("\"event\":\"{}\"", AUTH_FAILED.as_str())),
+        "the audit line must survive a filter that hides warn: {line}"
     );
 }

@@ -2,7 +2,7 @@
 
 use crate::bus::Signal;
 use crate::credential::RejectReason;
-use crate::identity::UserId;
+use crate::identity::{Permission, UserId, UserName};
 use crate::secret::Secret;
 use std::net::IpAddr;
 
@@ -50,10 +50,28 @@ impl Signal for DeviceRevoked {}
 pub struct AuthFailed {
     /// The client the attempt came from.
     pub client: IpAddr,
-    /// The named user, when the credential named one.
-    pub user: Option<String>,
+    /// The canonical user name, when the credential named a valid one;
+    /// `None` when the text given was not a user name the kernel can
+    /// canonicalize (the audit line still carries the clipped candidate).
+    pub user: Option<UserName>,
     /// Why the attempt was rejected.
     pub reason: RejectReason,
 }
 
 impl Signal for AuthFailed {}
+
+/// A recognized identity was refused a guarded route because it does not
+/// hold the route's permission; published by the guard check after every
+/// such refusal, so limiting and auditing modules see what the protocol's
+/// own denial hides.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccessDenied {
+    /// The client the request came from.
+    pub client: IpAddr,
+    /// The recognized user who lacked the permission.
+    pub user: UserName,
+    /// The permission the route required.
+    pub permission: Permission,
+}
+
+impl Signal for AccessDenied {}
