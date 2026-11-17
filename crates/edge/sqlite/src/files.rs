@@ -35,22 +35,23 @@ pub(crate) fn open_failure(
 /// the device plus inode `metadata` reports after following symlinks, so a
 /// symlink at the destination resolves to the file it guards against;
 /// elsewhere the canonical path is the closest std equivalent.
+#[cfg(unix)]
 pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt;
-        let (Ok(left), Ok(right)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
-            return false;
-        };
-        return left.dev() == right.dev() && left.ino() == right.ino();
-    }
-    #[cfg(not(unix))]
-    {
-        let (Ok(left), Ok(right)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) else {
-            return false;
-        };
-        left == right
-    }
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(left), Ok(right)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+/// Whether `a` and `b` name the same existing file, by canonical path: the closest std
+/// equivalent of device plus inode where those are unavailable.
+#[cfg(not(unix))]
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+    let (Ok(left), Ok(right)) = (std::fs::canonicalize(a), std::fs::canonicalize(b)) else {
+        return false;
+    };
+    left == right
 }
 
 /// Create `path` exclusively with mode 0600 (Unix): the file exists under
