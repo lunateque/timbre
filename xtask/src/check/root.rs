@@ -21,6 +21,7 @@ const ALLOWED: &[&str] = &[
     "deny.toml",
     "deps.allow",
     "docs",
+    "fuzz",
     "justfile",
     "rust-toolchain.toml",
     "rustfmt.toml",

@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The `fuzz/` harness's seam: the `fuzzing` module over the request parsers.
+# Off by default, so the shipped build carries no test-only surface.
+fuzzing = ["timbre-edge-config/fuzzing"]
+
 [dependencies]
 bytes = { workspace = true }
 form_urlencoded = { workspace = true }

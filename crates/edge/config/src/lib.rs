@@ -10,6 +10,10 @@
 pub mod failures;
 mod redact;
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
+
 use crate::failures::ConfigFailure;
 use redact::hide_value;
 
@@ -87,15 +91,7 @@ impl Config {
                 reason: hide_value(&error.to_string()),
             }) as Box<dyn timbre_kernel::Failure>
         })?;
-        let document = toml::from_str::<toml::Table>(&text).map_err(|error| {
-            Box::new(ConfigFailure::Invalid {
-                file: path.display().to_string(),
-                line: line_of(&text, error.span()),
-                // `Display` quotes the offending source line back; a config
-                // value can be a secret, so only the parser's own words stay.
-                reason: hide_value(error.message()),
-            }) as Box<dyn timbre_kernel::Failure>
-        })?;
+        let document = parse_document(&path.display().to_string(), &text)?;
         Ok(Config {
             path: Some(path),
             document,
@@ -191,6 +187,20 @@ impl Config {
 fn unicode_vars(pair: (std::ffi::OsString, std::ffi::OsString)) -> Option<(String, String)> {
     let (key, value) = pair;
     Some((key.into_string().ok()?, value.into_string().ok()?))
+}
+
+/// The one TOML parse both `load` and the `fuzzing` seam use: a table or a
+/// `config.invalid` that names the file and the line.
+pub(crate) fn parse_document(file: &str, text: &str) -> Fallible<toml::Table> {
+    toml::from_str::<toml::Table>(text).map_err(|error| {
+        Box::new(ConfigFailure::Invalid {
+            file: file.to_owned(),
+            line: line_of(text, error.span()),
+            // `Display` quotes the offending source line back; a config
+            // value can be a secret, so only the parser's own words stay.
+            reason: hide_value(error.message()),
+        }) as Box<dyn timbre_kernel::Failure>
+    })
 }
 
 /// The one-based line holding the error's span start, when the span is known.

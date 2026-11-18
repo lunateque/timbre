@@ -1,0 +1,4 @@
+[server]
+data_dir = "d"
+[http]
+guard_timeout_ms = 40

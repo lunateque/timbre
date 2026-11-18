@@ -1,0 +1,7 @@
+target/
+artifacts/
+# Only the checked-in seeds are tracked; the inputs a `cargo fuzz run` adds
+# to the corpus directories are local working state.
+corpus/**
+!corpus/*/
+!corpus/*/seed-*

@@ -9,6 +9,11 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+# The `fuzz/` harness's seam: `fuzzing::document` plus `fuzzing::section`.
+# Off by default, so the shipped build carries no test-only surface.
+fuzzing = []
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 timbre-kernel.workspace = true

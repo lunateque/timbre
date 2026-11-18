@@ -1,0 +1,69 @@
+name: fuzz
+on:
+  schedule:
+    # 03:17 UTC nightly; the odd minute keeps the run off the top-of-hour
+    # traffic the scheduled jobs all pile onto.
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes per target
+        type: string
+        default: "10"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fuzz:
+    name: fuzz ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    # A hang or a pathological input must not hold a runner all night; each
+    # target gets its bounded run plus slack for the nightly build.
+    timeout-minutes: 30
+    strategy:
+      # One crashing target must not cancel the others: every crash needs
+      # its own artifact before the job reports.
+      fail-fast: false
+      matrix:
+        target: [config, form_roundtrip, http_head, identity, log_filter, proxy]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install the nightly toolchain
+        # The `fuzz/` directory pins nightly in its own rust-toolchain.toml;
+        # here it is only fetched, never made the default, so `cargo install`
+        # of the tool itself builds on the image's stable.
+        run: rustup toolchain install nightly --profile minimal
+      - run: cargo install --locked cargo-fuzz@0.13.2
+      - name: Restore the corpus
+        uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+      - name: Run ${{ matrix.target }} for ${{ github.event.inputs.minutes || '10' }} minutes
+        working-directory: fuzz
+        # Running from `fuzz/` is what selects nightly; `-timeout=10` is
+        # libFuzzer's own hang oracle, per ADR 0003.
+        run: |
+          budget="$(( (${{ github.event.inputs.minutes || '10' }}) * 60 ))"
+          cargo fuzz run '${{ matrix.target }}' -- -dict=dict/timbre.dict -timeout=10 -max_total_time="$budget"
+      # Only the scheduled main runs write the cache back: a
+      # workflow_dispatch from any other branch would otherwise poison the
+      # corpus key that later runs restore.
+      - name: Save the corpus
+        if: github.event_name == 'schedule'
+        uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.sha }}
+      - name: Upload crashes
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: crash-${{ matrix.target }}-${{ github.run_id }}
+          path: fuzz/artifacts/${{ matrix.target }}/*
+          if-no-files-found: error

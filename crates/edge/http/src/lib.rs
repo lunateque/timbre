@@ -37,6 +37,10 @@ mod proxy;
 mod request;
 mod serve;
 
+#[cfg(feature = "fuzzing")]
+#[doc(hidden)]
+pub mod fuzzing;
+
 pub mod failures;
 pub mod log_events;
 

@@ -1,6 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/kernel", "crates/timbre", "crates/modules/hello", "crates/edge/runtime", "crates/edge/http", "crates/edge/sqlite", "crates/edge/config", "xtask"]
+# `fuzz/` is its own workspace (own `[workspace]` and lockfile): nightly and
+# clang live there and the stable gate must not resolve or build it.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "0.0.0"

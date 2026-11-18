@@ -56,6 +56,13 @@ impl Trusted {
             // be listed as an IPv6 prefix to be trusted.
             _ => return false,
         };
+        // A /0 prefix covers every address of its family (the family check
+        // above already rejected the other one), and shifting a `u128` by
+        // `128 - 0` overflows the shift amount: the answer is `true`
+        // before any shift is computed.
+        if self.bits == 0 {
+            return true;
+        }
         let shift = 128 - u32::from(self.bits);
         (left >> shift) == (right >> shift)
     }
@@ -234,6 +241,24 @@ mod tests {
         assert!(!trusted[0].contains("11.0.0.1".parse().expect("an address")));
         assert!(trusted[1].contains("fd12::5".parse().expect("an address")));
         assert!(!trusted[1].contains("fe12::5".parse().expect("an address")));
+    }
+
+    #[test]
+    fn a_zero_bit_prefix_trusts_its_whole_family() {
+        let trusted = trust(&["10.0.0.0/0"]);
+        assert!(trusted[0].contains("10.255.255.255".parse().expect("an address")));
+        assert!(trusted[0].contains("0.0.0.0".parse().expect("an address")));
+        // A v6 peer stays outside a v4 network even with a zero-width
+        // prefix; the family check runs before the shift.
+        assert!(!trusted[0].contains("::1".parse().expect("an address")));
+        // Every v4 hop is trusted, so the rightmost-untrusted scan ends
+        // with the peer; this also drove the shift panic the fuzz target
+        // found (`128 - 0` bits is no shift a `u128` can take).
+        let peer = "203.0.113.7".parse().expect("an address");
+        assert_eq!(
+            client_address(peer, Some("198.51.100.9, 10.0.0.1"), &trusted),
+            peer
+        );
     }
 
     #[test]

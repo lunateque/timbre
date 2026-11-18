@@ -84,8 +84,14 @@ impl HttpConfig {
     /// value of the wrong type.
     pub fn from_config(config: &timbre_edge_config::Config) -> Fallible<HttpConfig> {
         let section: HttpSection = config.section("http")?;
+        Ok(Self::from_section(section))
+    }
+
+    /// The merge the `[http]` section ends in: every absent key keeps its
+    /// [`HttpConfig::default`] value.
+    pub(crate) fn from_section(section: HttpSection) -> HttpConfig {
         let defaults = HttpConfig::default();
-        Ok(HttpConfig {
+        HttpConfig {
             listen: section.listen.unwrap_or(defaults.listen),
             trusted_proxies: section.trusted_proxies.unwrap_or(defaults.trusted_proxies),
             max_body_bytes: section.max_body_bytes.unwrap_or(defaults.max_body_bytes),
@@ -100,7 +106,7 @@ impl HttpConfig {
             handler_timeout: milliseconds(section.handler_timeout_ms, defaults.handler_timeout),
             guard_timeout: milliseconds(section.guard_timeout_ms, defaults.guard_timeout),
             max_param_pairs: section.max_param_pairs.unwrap_or(defaults.max_param_pairs),
-        })
+        }
     }
 }
 

@@ -10,8 +10,21 @@ ci:
     cargo machete
     typos
     cargo test --workspace --all-features --locked
+    # The fuzz smoke on stable: the corpus (seeds and regression fixtures)
+    # replayed through the target functions. The nightly `cargo fuzz` run
+    # lives in the fuzz workflow; this line needs no nightly and no clang.
+    cargo fmt --all --manifest-path fuzz/Cargo.toml --check
+    cargo clippy --manifest-path fuzz/Cargo.toml --all-targets --no-default-features --locked -- -D warnings
+    cargo test --manifest-path fuzz/Cargo.toml --no-default-features --locked
     cargo xtask removability
     RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
+
+# Fuzz one target for [seconds] (nightly only, per fuzz/rust-toolchain.toml):
+# `just fuzz proxy 300`. Extra libFuzzer flags go after `--`, e.g.
+# `just fuzz http_head 600 -- -runs=1000`. The corpus cargo fuzz grows stays
+# out of git; only `fuzz/corpus/<target>/seed-*` files are tracked.
+fuzz target seconds="60" *args:
+    cd fuzz && cargo fuzz run {{target}} -- -dict=dict/timbre.dict -timeout=10 -max_total_time={{seconds}} {{args}}
 
 # Apply formatting and the machine-applicable clippy fixes.
 fix:

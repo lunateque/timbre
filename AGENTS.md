@@ -69,6 +69,20 @@ whole workspace is kept honest by one command: `just ci`.
   public tree; design documents and plans go to `.internal/` (a separate
   repository, never committed here).
 
+## Fuzzing
+
+- `fuzz/` is a cargo-fuzz crate outside the workspace (own lockfile, own
+  nightly pin); the stable gate never builds its `#![no_main]` bins.
+- Targets drive the real parsers through the edge crates' `fuzzing` feature
+  and assert the contracts (round trips, differentials), never "does not
+  panic". Add a target by following `fuzz/AGENTS.md`.
+- `just fuzz <target> [seconds]` runs one target locally (nightly + clang);
+  `.github/workflows/fuzz.yml` runs every target nightly.
+- Every crash becomes a regression test: `cargo fuzz tmin` shrinks it, the
+  bytes are checked in as `fuzz/corpus/<target>/seed-regression-<name>`
+  (replayed by `just ci`), and the parser gets the fix plus a unit test in
+  the same change.
+
 ## History
 
 - Work on a local branch; land with `just land <branch>`, which squashes the

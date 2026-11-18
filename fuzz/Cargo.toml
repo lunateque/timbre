@@ -1,0 +1,109 @@
+[workspace]
+resolver = "3"
+
+[package]
+name = "timbre-fuzz"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.100"
+license = "AGPL-3.0-only"
+publish = false
+
+# The cargo-fuzz crate lives outside the main workspace on purpose: the
+# `fuzz_target!` binaries need a nightly toolchain and clang, while the
+# stable gate must stay able to `cargo test` this package's library (the
+# same target functions, replayed over the corpus). `fuzz/rust-toolchain.toml`
+# selects nightly here; the `#![no_main]` bins hang off the default
+# `fuzz-targets` feature, so the stable `cargo test --no-default-features`
+# compiles the lib and the replay tests and never links a bin.
+
+[package.metadata]
+cargo-fuzz = true
+
+[features]
+default = ["fuzz-targets"]
+# On by default, so a bare `cargo +nightly fuzz build` compiles every target.
+# The stable smoke (`cargo test` in `just ci`) runs with `--no-default-features`:
+# `cargo test` links the package's bins for its integration tests, and the
+# `#![no_main]` fuzz targets have no entry point until libFuzzer's flags give
+# them one, which only the nightly fuzz build does.
+fuzz-targets = ["dep:libfuzzer-sys"]
+
+[dependencies]
+form_urlencoded = "1.2.2"
+libfuzzer-sys = { version = "0.4.13", optional = true }
+timbre-edge-http = { path = "../crates/edge/http", features = ["fuzzing"] }
+timbre-kernel = { path = "../crates/kernel" }
+
+# Each target is one parser family; a crash names the family it reached.
+[[bin]]
+name = "http_head"
+path = "fuzz_targets/http_head.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "form_roundtrip"
+path = "fuzz_targets/form_roundtrip.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy"
+path = "fuzz_targets/proxy.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "identity"
+path = "fuzz_targets/identity.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "log_filter"
+path = "fuzz_targets/log_filter.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+print_stderr = "deny"
+# The harness is test code: the assertions *are* the oracle, and an
+# input the contract promises away may be `expect`ed or `panic!`ed on
+# without routing through the failure machinery a shipped crate uses.
+unwrap_used = "allow"
+expect_used = "allow"
+panic = "allow"
+indexing_slicing = "allow"
+
+# The fuzz build mirrors cargo-fuzz's own flags: debug assertions and
+# overflow checks turn arithmetic bugs into crashes.
+[profile.release]
+overflow-checks = true
+debug-assertions = true
