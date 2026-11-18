@@ -22,7 +22,9 @@ operator commands: `check` (integrity), `backup` (online backup API;
 refuses an existing destination without `force`, refuses a destination
 that is the live database file itself, creates the destination exclusively
 with mode 0600 on Unix before the first copied byte — so a raced symlink
-fails closed instead of being followed — and deletes the partial file when
+fails closed instead of being followed — opens it for the copy with
+`SQLITE_OPEN_NOFOLLOW` (a symlink swapped in after the probe is refused at
+open, not written through) and deletes the partial file when
 the copy fails) and `owned_tables`/`drop_tables` (what `timbre db prune`
 lists and drops; a table belongs to the registered module with the longest
 `<module>_` prefix of its name).

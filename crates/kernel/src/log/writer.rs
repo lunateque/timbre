@@ -14,7 +14,7 @@ use crate::ctx::RequestId;
 use crate::log::format;
 use crate::log::logger::{Clock, Format};
 use crate::log::{Level, LogEvent, LogValue};
-use crate::log_events::LOG_DROPPED;
+use crate::log_events::{AUDIT_DROPPED, LOG_DROPPED};
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SyncSender};
@@ -47,6 +47,7 @@ enum Message {
 struct Reporter {
     sink: Arc<Sink>,
     dropped: Arc<AtomicU64>,
+    audit_dropped: Arc<AtomicU64>,
     format: Format,
     clock: Clock,
 }
@@ -70,10 +71,16 @@ impl Reporter {
         self.write_report(&mut sink);
     }
 
-    /// One `kernel.log_dropped` line at `warn` for the lines dropped since the
-    /// last report, written with the sink already held.
+    /// One `kernel.log_dropped` line and, when audit lines fell too, one
+    /// `kernel.audit_dropped` line, each at `warn` with its `count`, written
+    /// with the sink already held.
     fn write_report(&self, sink: &mut Box<dyn Write + Send>) {
-        let count = self.dropped.swap(0, Ordering::Relaxed);
+        self.write_count(sink, &self.dropped, &LOG_DROPPED);
+        self.write_count(sink, &self.audit_dropped, &AUDIT_DROPPED);
+    }
+
+    fn write_count(&self, sink: &mut Box<dyn Write + Send>, count: &AtomicU64, event: &LogEvent) {
+        let count = count.swap(0, Ordering::Relaxed);
         if count == 0 {
             return;
         }
@@ -82,7 +89,7 @@ impl Reporter {
             self.format,
             (self.clock)(),
             Level::Warn,
-            &LOG_DROPPED,
+            event,
             None,
             &fields,
         );
@@ -102,18 +109,21 @@ pub(super) struct Queue {
 
 impl Queue {
     /// Start the writer thread. `None` when the OS refuses one: the caller then writes
-    /// each line itself, so none is lost. `dropped` is the logger's shared count:
-    /// overflowed inline and queued lines land in one report.
+    /// each line itself, so none is lost. `dropped` and `audit_dropped` are the
+    /// logger's shared counts: overflowed inline and queued lines land in one
+    /// report, dropped audit lines in their own.
     pub(super) fn start(
         sink: Arc<Sink>,
         format: Format,
         clock: Clock,
         dropped: Arc<AtomicU64>,
+        audit_dropped: Arc<AtomicU64>,
     ) -> Option<Self> {
         let (sender, inbox) = mpsc::sync_channel(QUEUE_CAPACITY);
         let reporter = Reporter {
             sink,
             dropped,
+            audit_dropped,
             format,
             clock,
         };
@@ -218,7 +228,13 @@ impl Writer {
     fn run(&self) {
         loop {
             match self.inbox.recv_timeout(CAUGHT_UP_AFTER) {
-                Ok(Message::Line(line)) => write_line(&self.reporter.sink, &line),
+                // A line the sink refused never reached the log: it counts
+                // as dropped like one the queue overflowed.
+                Ok(Message::Line(line)) => {
+                    if !write_line(&self.reporter.sink, &line) {
+                        self.reporter.dropped.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
                 Ok(Message::Flush(ack)) => {
                     self.reporter.report();
                     // The flusher may have stopped waiting, which leaves nothing owed.
@@ -229,7 +245,9 @@ impl Writer {
                     // Drain what is already queued before the final report, so a
                     // shutdown flush's lines count as delivered, not dropped.
                     while let Ok(Message::Line(line)) = self.inbox.try_recv() {
-                        write_line(&self.reporter.sink, &line);
+                        if !write_line(&self.reporter.sink, &line) {
+                            self.reporter.dropped.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                     self.reporter.report_blocking();
                     return;
@@ -260,8 +278,12 @@ fn lock_sink(sink: &Sink) -> MutexGuard<'_, Box<dyn Write + Send>> {
     sink.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Write one line. Logging never fails the caller, so sink errors are dropped.
-pub(super) fn write_line(sink: &Sink, line: &str) {
+/// Write one line, `false` when the sink refused it (disk full, closed
+/// pipe): logging never fails the caller, so a refused line must at least
+/// reach the dropped count, and the caller owns that bucket.
+pub(super) fn write_line(sink: &Sink, line: &str) -> bool {
     let mut sink = lock_sink(sink);
-    let _ = sink.write_all(line.as_bytes()).and_then(|()| sink.flush());
+    sink.write_all(line.as_bytes())
+        .and_then(|()| sink.flush())
+        .is_ok()
 }

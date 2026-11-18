@@ -12,6 +12,8 @@ pub(crate) mod guard;
 pub(crate) mod handlers;
 pub(crate) mod wire;
 
+use http_body_util::BodyExt;
+use std::fmt::Write as _;
 use std::io::Write;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,7 +24,10 @@ use timbre_kernel::{
     CredentialKind, Ctx, Format, Guard, Kernel, LogFilter, Logger, Registry, Runtime, ThreadRuntime,
 };
 
-use handlers::{broken_stream, echo, echo_query, param, slow, slow_stream, stream, wrong_length};
+use handlers::{
+    bad_declared_stream, broken_stream, declared_stream, double_declared_stream, echo, echo_query,
+    endless_stream, long_stream, param, short_stream, slow, slow_stream, stream, wrong_length,
+};
 
 /// A running `serve`, its bound address and the log it has written.
 pub(crate) struct TestServer {
@@ -84,8 +89,19 @@ fn routes(counter: Arc<guard::SharedCounter>) -> Registry {
         (Method::Post, "/echo", echo),
         (Method::Post, "/query", echo_query),
         (Method::Get, "/stream", stream),
+        (Method::Get, "/declared-stream", declared_stream),
+        (Method::Head, "/declared-stream", declared_stream),
+        (Method::Get, "/short-stream", short_stream),
+        (Method::Get, "/long-stream", long_stream),
+        (Method::Get, "/bad-declared-stream", bad_declared_stream),
+        (
+            Method::Get,
+            "/double-declared-stream",
+            double_declared_stream,
+        ),
         (Method::Get, "/broken", broken_stream),
         (Method::Get, "/slow-stream", slow_stream),
+        (Method::Get, "/endless", endless_stream),
         (Method::Get, "/slow", slow),
         (Method::Get, "/wrong-length", wrong_length),
         (Method::Get, "/rest/{method}", param),
@@ -218,6 +234,62 @@ impl TestServer {
     /// How many times the guarded handler has actually run.
     pub(crate) fn guarded_calls(&self) -> usize {
         self.counter.calls()
+    }
+
+    /// Send one HTTP/2 (h2c, preface-detected) `GET target` and return the
+    /// raw answer `"<status>\n<name>: <value>\n...\n\n<body>"`. hyper's own
+    /// client speaks it, so a length the edge put on the wire is read back
+    /// the way a real HTTP/2 client reads it.
+    #[expect(
+        clippy::expect_used,
+        reason = "test helper: an h2 roundtrip that fails is the failure to report"
+    )]
+    pub(crate) fn roundtrip_h2(&self, target: &str) -> String {
+        let address = self.address;
+        let text = target.to_owned();
+        std::thread::spawn(move || {
+            let tokio = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a tokio runtime for the h2 client");
+            tokio.block_on(async move {
+                let stream = tokio::net::TcpStream::connect(address)
+                    .await
+                    .expect("the server accepts");
+                let io = hyper_util::rt::TokioIo::new(stream);
+                let (mut sender, connection) =
+                    hyper::client::conn::http2::handshake(hyper_util::rt::TokioExecutor::new(), io)
+                        .await
+                        .expect("the h2 handshake completes");
+                // The connection future drives the stream: it must run.
+                let driver = tokio::spawn(async move {
+                    let _ = connection.await;
+                });
+                let request = hyper::Request::get(&text)
+                    .body(http_body_util::Empty::<hyper::body::Bytes>::new())
+                    .expect("a GET request");
+                let response = sender
+                    .send_request(request)
+                    .await
+                    .expect("the request is answered");
+                let status = response.status().as_u16();
+                let mut head = format!("{status}\n");
+                for (name, value) in response.headers() {
+                    let text = String::from_utf8_lossy(value.as_bytes()).into_owned();
+                    let _ = writeln!(head, "{name}: {text}");
+                }
+                let body = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("the body arrives")
+                    .to_bytes();
+                drop(driver);
+                format!("{head}\n{}", String::from_utf8_lossy(&body))
+            })
+        })
+        .join()
+        .expect("the h2 client thread ends")
     }
 
     /// Send `request` on a fresh connection, collecting the answer until the

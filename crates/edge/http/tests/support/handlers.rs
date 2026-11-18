@@ -99,6 +99,29 @@ pub(crate) fn slow_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
     })
 }
 
+/// A stream that never runs out: 64 KiB per chunk, forever, so a client that
+/// stops reading leaves the server with bytes it cannot write. The body only
+/// ends when the connection does.
+pub(crate) fn endless_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        Ok(Response::new(200)
+            .with_header("content-type", b"application/octet-stream")
+            .with_body(Body::Stream(Box::pin(Endless { written: 0 }))))
+    })
+}
+
+struct Endless {
+    written: usize,
+}
+
+impl Chunks for Endless {
+    fn poll_chunk(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Fallible<Vec<u8>>>> {
+        let this = self.get_mut();
+        this.written = this.written.wrapping_add(1);
+        Poll::Ready(Some(Ok(vec![b'x'; 64 * 1024])))
+    }
+}
+
 /// A handler that answers only after 2 s: past every timeout a test sets.
 pub(crate) fn slow(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
     Box::pin(async {
@@ -107,8 +130,8 @@ pub(crate) fn slow(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
     })
 }
 
-/// A response that carries its own wrong framing headers: hyper must
-/// override them, not send them.
+/// A response that carries its own wrong framing headers: the in-memory
+/// body's `content-length` must not reach the wire, hyper overrides it.
 pub(crate) fn wrong_length(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
     Box::pin(async {
         Ok(Response::new(200)
@@ -116,6 +139,64 @@ pub(crate) fn wrong_length(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> 
             .with_header("transfer-encoding", b"chunked")
             .with_header("connection", b"close")
             .with_body(Body::text("hello world")))
+    })
+}
+
+/// The same two chunks `stream` sends, but with the exact `content-length`
+/// a handler would declare for them: the one framing header a streamed
+/// body is allowed to keep, and the size the request log must report.
+pub(crate) fn declared_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        let chunks = VecDeque::from(vec![b"first-".to_vec(), b"second".to_vec()]);
+        Ok(Response::new(200)
+            .with_header("content-length", b"12")
+            .with_body(Body::Stream(Box::pin(TwoChunks(chunks)))))
+    })
+}
+
+/// A stream that yields five bytes but declares twelve: the promise the
+/// wire cannot keep, which must cost the connection, never a desynchronized
+/// keep-alive stream.
+pub(crate) fn short_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        let chunks = VecDeque::from(vec![b"five!".to_vec()]);
+        Ok(Response::new(200)
+            .with_header("content-length", b"12")
+            .with_body(Body::Stream(Box::pin(TwoChunks(chunks)))))
+    })
+}
+
+/// A stream whose declared length is no number at all: the edge drops the
+/// header, logs it and lets hyper frame the body its own way.
+pub(crate) fn bad_declared_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        let chunks = VecDeque::from(vec![b"first-".to_vec(), b"second".to_vec()]);
+        Ok(Response::new(200)
+            .with_header("content-length", b"twelve")
+            .with_body(Body::Stream(Box::pin(TwoChunks(chunks)))))
+    })
+}
+
+/// A stream with two `content-length` headers that agree: still a value the
+/// edge cannot pass through, because one wire header may carry only one.
+pub(crate) fn double_declared_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        let chunks = VecDeque::from(vec![b"first-".to_vec(), b"second".to_vec()]);
+        Ok(Response::new(200)
+            .with_header("content-length", b"12")
+            .with_header("content-length", b"12")
+            .with_body(Body::Stream(Box::pin(TwoChunks(chunks)))))
+    })
+}
+
+/// A stream that overshoots its declared length: the wire may not carry
+/// more than the promise, and the connection must survive the lie intact.
+pub(crate) fn long_stream(_: Ctx, _: Request) -> BoxFuture<Fallible<Response>> {
+    Box::pin(async {
+        let chunks = VecDeque::from(vec![b"first-".to_vec(), b"second".to_vec()]);
+        Ok(Response::new(200)
+            .with_header("content-length", b"5")
+            .with_body(Body::Stream(Box::pin(TwoChunks(chunks)))))
     })
 }
 

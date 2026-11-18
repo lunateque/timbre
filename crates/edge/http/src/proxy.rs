@@ -43,7 +43,7 @@ impl Trusted {
 
     /// Whether `address` is inside this trusted network.
     #[must_use]
-    fn contains(self, address: IpAddr) -> bool {
+    pub(crate) fn contains(self, address: IpAddr) -> bool {
         let (left, right) = match (self.network, address) {
             (IpAddr::V4(network), IpAddr::V4(probe)) => (
                 u128::from(Octets::from(network)),

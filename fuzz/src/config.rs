@@ -107,6 +107,8 @@ pub fn config(data: &[u8]) {
         let stored: Option<u128> = match lower.as_str() {
             "max_body_bytes" => u128::try_from(http.max_body_bytes).ok(),
             "max_param_pairs" => u128::try_from(http.max_param_pairs).ok(),
+            "max_connections_per_client" => u128::try_from(http.max_connections_per_client).ok(),
+            "send_stall_timeout_ms" => Some(http.send_stall_timeout.as_millis()),
             "handler_timeout_ms" => Some(http.handler_timeout.as_millis()),
             "guard_timeout_ms" => Some(http.guard_timeout.as_millis()),
             "body_read_timeout_ms" => Some(http.body_read_timeout.as_millis()),
@@ -116,11 +118,16 @@ pub fn config(data: &[u8]) {
             _ => None,
         };
         if let Some(stored) = stored {
-            assert_eq!(
-                stored,
-                u128::from(wanted),
-                "`{key}` must reach the config unchanged"
-            );
+            // The per-client cap is the one numeric key whose value the
+            // config may not keep as spelled: a configured 0 clamps to 1
+            // (a cap of zero would refuse every peer forever), so the
+            // expected side applies the same clamp before comparing.
+            let expected = if lower == "max_connections_per_client" {
+                u128::from(wanted.max(1))
+            } else {
+                u128::from(wanted)
+            };
+            assert_eq!(stored, expected, "`{key}` must reach the config unchanged");
         }
     }
     // The same document with no overrides must still parse: the merge of an

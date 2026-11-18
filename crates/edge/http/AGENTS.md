@@ -44,7 +44,20 @@ rule runs; scanning right to left, a hop that does not parse as an address
 client-forged left hop is never blamed for what the peer did. The kernel
 `Response`'s framing headers (`content-length`,
 `transfer-encoding`, `connection`, `keep-alive`, `upgrade`) are dropped
-so hyper derives them from the body it serves. Limits: a configurable
+so hyper derives them from the body it serves, with one exception: a
+`Body::Stream` is the body hyper cannot size itself, so its
+`content-length` reaches the wire when exactly one header carries one
+well-formed value (ASCII digits a `u64` holds) - the edge also reports it
+as the body's exact size, which is what frames the response by length
+(chunked otherwise, and what makes a `HEAD` of the stream carry the header
+with no body) and puts the declared number in the `http.request` line's
+`bytes`. The stream must then produce exactly that many bytes: shorter, and
+hyper aborts the connection at end-of-body without reusing it (the client
+loses that answer, never the next one); longer, and the bytes past the
+promise are cut and the connection stays usable. A malformed or duplicated
+value is dropped like the rest of the framing and logged as
+`http.content_length_invalid`, so a bad declaration costs the size hint,
+never the response. Limits: a configurable
 header-read timeout (10 s by default) that also bounds protocol
 detection - a connection silent through its first bytes is closed within
 it and releases its slot - and detection parks between peeks of an
@@ -56,19 +69,36 @@ default, 504 on expiry) that bounds the route's guard check; 16 KiB of
 headers (h1 byte cap and header count, h2 header list size), a
 configurable body cap (413 above
 it), a configurable cap of query+form pairs (1024 by default; URL
-overflow 414, key overflow 431, form overflow 413, each logged), a 30 s
+overflow 414, key overflow 431, form overflow 413, each logged; a form is
+parsed bounded, so an over-cap body costs the cap plus one pair and not
+the whole list), a 30 s
 configurable body read timeout (408 on expiry), at most 1024 concurrent
 connections and at most 16 concurrent HTTP/2 streams on one connection
-(HTTP/1.1 is one request at a time on its connection anyway), and a 10 s
+(HTTP/1.1 is one request at a time on its connection anyway), a
+configurable cap of live connections per client address
+(`max_connections_per_client`, 64 by default, a configured `0` clamps to 1 -
+zero would refuse every peer forever; a peer over the cap is
+closed at once and logged as `http.connections_full`, and peers listed in
+`trusted_proxies` are exempt because behind a proxy every client shares
+the proxy's one address), and a 10 s
 drain of in-flight responses on shutdown. A streaming response body that
 fails mid-flight cannot change the head any more; the failure logs as
-`http.stream_failed` with its code.
+`http.stream_failed` with its code. Every accepted socket gets TCP
+keepalive (idle 30 s, probes every 15 s, four misses kill it), and every
+response write runs behind a configurable send-stall guard
+(`send_stall_timeout_ms`, 300 s by default, deliberately generous because
+a paused player legitimately stops reading): a write or flush that lands
+no byte for that long fails the connection and logs `http.send_stall`.
+The guard wraps the connection's IO under both protocols, below hyper's
+state machines; the bound counts time since the last byte moved, so a
+slow-but-moving client is never punished.
 
 The `[http]` config section is owned here: `HttpConfig::from_config`
 reads it through `timbre-edge-config` (keys `listen`, `trusted_proxies`,
 `max_body_bytes`, `header_read_timeout_ms`, `handler_timeout_ms`,
 `guard_timeout_ms`,
-`body_read_timeout_ms`, `max_param_pairs`, each with the default of
+`body_read_timeout_ms`, `max_param_pairs`, `max_connections_per_client`,
+`send_stall_timeout_ms`, each with the default of
 `HttpConfig::default`; unknown keys fail with `config.invalid`), applies
 `TIMBRE_HTTP__<KEY>` environment overrides, and converts the millisecond
 values into the durations the server runs on.
@@ -83,9 +113,11 @@ None.
 
 ## Log events
 
-Every line but `http.listening` carries the standard `request` field: each
+Every line but `http.listening`, `http.connections_full` and
+`http.send_stall` carries the standard `request` field: each
 request runs on a `Ctx` bound to its request id, so its lines correlate
-with the `http.request` summary.
+with the `http.request` summary; the two connection-level lines belong to
+no request, only to a peer address.
 
 - `http.listening` (`LISTENING`, info): a configured address is bound and
   accepting; fields `addr` (the bound address, so an ephemeral port is
@@ -121,6 +153,16 @@ with the `http.request` summary.
 - `http.stream_failed` (`STREAM_FAILED`, warn): a streaming response body
   failed after its head was sent; field `code` (the producing failure's
   code).
+- `http.content_length_invalid` (`CONTENT_LENGTH_INVALID`, warn): a
+  streamed response carried a `content-length` the edge cannot trust - a
+  malformed value, or more than one - so it was dropped and hyper framed the
+  body chunked instead; field `value` (what arrived, clipped).
+- `http.connections_full` (`CONNECTIONS_FULL`, warn): a peer already holds
+  `max_connections_per_client` live connections and its new one was closed
+  at once; fields `peer` (the address) and `limit` (the cap it crossed).
+- `http.send_stall` (`SEND_STALL`, warn): a response write made no progress
+  for `send_stall_timeout`; the connection is failed and its slot released;
+  fields `peer` (the address) and `ms` (the bound that expired).
 
 ## Failures
 

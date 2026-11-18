@@ -96,7 +96,7 @@ request: client, canonical user, required permission).
 
 ## Log events
 
-Declared in `src/log_events.rs`. Three worth knowing about:
+Declared in `src/log_events.rs`. These are worth knowing about:
 
 - `kernel.auth_failed` (`warn`, fields `client`, `user`, `reason`): one line
   per rejected credential. Written at `warn` regardless of the log filter,
@@ -110,6 +110,12 @@ Declared in `src/log_events.rs`. Three worth knowing about:
   the permission a guarded route requires. Written unconditionally like the
   auth-failure line, and the guard also publishes `signals::AccessDenied`
   with the same fields.
+- `kernel.handler_failed` (`warn`, fields `signal`, `code`/`panicked`): one
+  signal handler failed - `code` carries the `FailureCode` of an `Err`
+  handler, `panicked: true` (and no `code`) a handler that unwound. The bus
+  catches each handler's panic, so one module's bug cannot kill the thread
+  that published the signal (every failed login publishes one); the other
+  handlers still run and the publisher is unaffected.
 - `kernel.log_dropped` (`warn`, field `count`): that many lines were dropped
   while the sink lagged: queued (info/debug/trace) lines when the bounded
   queue filled, or an inline `warn`/`error` line when the sink mutex stayed
@@ -118,3 +124,11 @@ Declared in `src/log_events.rs`. Three worth knowing about:
   bypasses the module filter, so it arrives even when `kernel` is filtered
   above `warn`. A flush or shutdown wait holds on a wedged sink for at most
   2 s, then returns or detaches the writer thread.
+- `kernel.audit_dropped` (`warn`, field `count`): that many `write_always`
+  audit lines (`kernel.auth_failed`, `kernel.access_denied`) were dropped
+  while the sink lagged, counted apart from ordinary lines so a watcher on
+  the audit trail sees the gap without reading the generic report. The line
+  is unfiltered like the audit lines themselves and arrives with the next
+  dropped-lines report, from the same mechanism. A line either bucket lost
+  counts a sink that refused it too: an inline or queued `write` that ends
+  in an IO error (disk full, closed pipe) is a drop, never a delivery.

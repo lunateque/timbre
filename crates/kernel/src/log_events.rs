@@ -2,7 +2,8 @@
 
 use crate::log::LogEvent;
 
-/// A signal handler returned an error; the other handlers still ran.
+/// A signal handler returned an error or panicked; the other handlers still
+/// ran. `panicked` says which.
 pub const HANDLER_FAILED: LogEvent = LogEvent::new("kernel.handler_failed");
 /// A blocking closure panicked; the awaiter receives a `kernel.blocking_panicked` failure.
 pub const BLOCKING_PANICKED: LogEvent = LogEvent::new("kernel.blocking_panicked");
@@ -18,3 +19,7 @@ pub const AUTH_FAILED: LogEvent = LogEvent::new("kernel.auth_failed");
 pub const ACCESS_DENIED: LogEvent = LogEvent::new("kernel.access_denied");
 /// The writer dropped log lines while the sink lagged; `count` says how many.
 pub const LOG_DROPPED: LogEvent = LogEvent::new("kernel.log_dropped");
+/// The writer dropped audit lines (`write_always`) while the sink lagged;
+/// `count` says how many. Reported apart from `kernel.log_dropped` so an
+/// operator watching auth failures sees when the audit trail itself gapped.
+pub const AUDIT_DROPPED: LogEvent = LogEvent::new("kernel.audit_dropped");

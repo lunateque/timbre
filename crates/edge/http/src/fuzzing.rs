@@ -20,10 +20,18 @@ pub fn path_and_query(target: &str) -> Result<(String, Vec<(String, String)>), u
     crate::adapter::path_and_query(target)
 }
 
-/// Copy of the crate-internal [`crate::adapter::form_pairs`].
+/// Every pair of a form body: the crate-internal [`crate::form::form_pairs`]
+/// with a budget no body can exceed.
 #[must_use]
 pub fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
-    crate::adapter::form_pairs(body)
+    crate::form::form_pairs(body, usize::MAX).0
+}
+
+/// Copy of the crate-internal [`crate::form::form_pairs`]: at most `budget`
+/// pairs, and whether the body held another one.
+#[must_use]
+pub fn form_pairs_bounded(body: &[u8], budget: usize) -> (Vec<(String, String)>, bool) {
+    crate::form::form_pairs(body, budget)
 }
 
 /// Copy of the crate-internal [`crate::adapter::is_form_post`].

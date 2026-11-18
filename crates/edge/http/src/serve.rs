@@ -5,18 +5,21 @@
 use crate::config::HttpConfig;
 use crate::detect;
 use crate::failures::HttpFailure;
-use crate::log_events::LISTENING;
+use crate::log_events::{CONNECTIONS_FULL, LISTENING};
 use crate::proxy::Trusted;
 use crate::request::handle;
+use crate::write_guard::WriteGuard;
 use hyper::service::service_fn;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
 use hyper_util::server::conn::auto::Builder as AutoBuilder;
 use hyper_util::server::graceful::GracefulShutdown;
+use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 use timbre_kernel::{Ctx, Failure, Fallible, log};
 use tokio::net::TcpListener;
@@ -38,6 +41,15 @@ const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 const H2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(30);
 /// At most this many live connections at once.
 const MAX_CONNECTIONS: usize = 1024;
+/// TCP keepalive: start probing after 30 s of an idle socket, one probe every
+/// 15 s, and drop the connection after four misses. A peer that vanished
+/// without a FIN or RST (a laptop asleep on a network that quietly died)
+/// otherwise stays a live connection forever: keepalive is what turns a dead
+/// peer into a closed socket, and it covers the case the send-stall guard
+/// cannot, because an idle connection has no write to stall.
+const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+const KEEPALIVE_RETRIES: u32 = 4;
 
 /// Serve every address in `config` until `ctx` reports shutdown, then stop
 /// accepting, drain in-flight responses for up to ten seconds, and return.
@@ -60,6 +72,7 @@ async fn run(ctx: Ctx, config: HttpConfig) -> Fallible {
         config,
         trusted,
         slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
+        per_client: Arc::new(Mutex::new(HashMap::new())),
     });
     let mut listeners = Vec::new();
     for entry in &limits.config.listen {
@@ -88,8 +101,35 @@ async fn run(ctx: Ctx, config: HttpConfig) -> Fallible {
                 // one stop signal held by `graceful`.
                 let watcher = graceful.watcher();
                 tokio::spawn(async move {
-                    let _permit = permit;
-                    drive(stream, peer, limits, watcher).await;
+                    // Counted by peer address after accept: a flood of
+                    // connections from one address must not starve every
+                    // other client of the global slot pool. A peer listed in
+                    // `trusted_proxies` is exempt: behind a proxy every real
+                    // client shares the proxy's one address, so the cap
+                    // there would lock the whole deployment out.
+                    let client = match limits.admit(peer.ip()) {
+                        Admission::Admitted(ticket) => ticket,
+                        Admission::Full => {
+                            log!(
+                                limits.ctx,
+                                warn,
+                                CONNECTIONS_FULL,
+                                peer = peer.ip().to_string(),
+                                limit = u64::try_from(limits.config.max_connections_per_client)
+                                    .unwrap_or(u64::MAX)
+                            );
+                            // The socket drops here: the connection is closed
+                            // at once, its global slot with it.
+                            return;
+                        }
+                    };
+                    {
+                        let _permit = permit;
+                        drive(stream, peer, Arc::clone(&limits), watcher).await;
+                    }
+                    // The peer's own count is released once its drive returns
+                    // and the global slot above is back.
+                    drop(client);
                 });
             }
         });
@@ -141,6 +181,63 @@ pub(crate) struct Limits {
     pub(crate) config: HttpConfig,
     pub(crate) trusted: Vec<Trusted>,
     slots: Arc<Semaphore>,
+    /// Live connections per peer address, behind the per-client cap. Only
+    /// untrusted peers are counted, so one entry per real client, never one
+    /// per proxied browser.
+    per_client: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+/// One admitted peer connection; dropping it frees the peer's slot.
+struct PeerTicket {
+    peer: IpAddr,
+    counts: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+impl Drop for PeerTicket {
+    fn drop(&mut self) {
+        let mut counts = self.counts.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = counts.get_mut(&self.peer) {
+            // Every decrement belongs to a ticket this map handed out, so the
+            // count cannot underflow; the entry leaves once the peer holds
+            // nothing, keeping the map bounded by the live peers.
+            *held = held.saturating_sub(1);
+            if *held == 0 {
+                counts.remove(&self.peer);
+            }
+        }
+    }
+}
+
+/// Whether one accepted connection may be served under the per-client cap.
+enum Admission {
+    /// Serve it; the ticket, when there is one, releases the peer's slot.
+    Admitted(Option<PeerTicket>),
+    /// The peer is already at `max_connections_per_client`.
+    Full,
+}
+
+impl Limits {
+    /// Take one per-client slot for `peer`. A peer inside `trusted_proxies`
+    /// is exempt and never counted: behind it every real client shares the
+    /// proxy's one address.
+    fn admit(&self, peer: IpAddr) -> Admission {
+        if self.trusted.iter().any(|proxy| proxy.contains(peer)) {
+            return Admission::Admitted(None);
+        }
+        let mut counts = self
+            .per_client
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let held = counts.get(&peer).copied().unwrap_or_default();
+        if held >= self.config.max_connections_per_client {
+            return Admission::Full;
+        }
+        counts.insert(peer, held + 1);
+        Admission::Admitted(Some(PeerTicket {
+            peer,
+            counts: Arc::clone(&self.per_client),
+        }))
+    }
 }
 
 pub(crate) type HyperReply = http::Response<crate::body::Reply>;
@@ -155,6 +252,19 @@ async fn drive(
     if stream.set_nodelay(true).is_err() {
         // Nagle stays on; a socket that refuses the option still serves.
     }
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(KEEPALIVE_IDLE)
+        .with_interval(KEEPALIVE_INTERVAL)
+        .with_retries(KEEPALIVE_RETRIES);
+    if socket2::SockRef::from(&stream)
+        .set_tcp_keepalive(&keepalive)
+        .is_err()
+    {
+        // Keepalive stays off; a socket that refuses the option still serves.
+        // The send-stall guard below bounds the one case that matters most
+        // (a dead peer of an in-flight response); a fully idle half-open
+        // connection then waits for the next write to find it gone.
+    }
     // hyper's own protocol probe has no timer of its own, so the first bytes
     // are waited for under the header-read budget here: a client that
     // connects and says nothing then releases its slot instead of holding it
@@ -166,7 +276,12 @@ async fn drive(
     {
         return;
     }
-    let io = TokioIo::new(stream);
+    let io = WriteGuard::new(
+        TokioIo::new(stream),
+        limits.config.send_stall_timeout,
+        limits.ctx.clone(),
+        peer.ip().to_string(),
+    );
     let ctx = limits.ctx.clone();
     // The builder reads this after the service closure has taken `limits`.
     let header_read_timeout = limits.config.header_read_timeout;

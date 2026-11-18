@@ -28,3 +28,15 @@ pub const GUARD_TIMEOUT: LogEvent = LogEvent::new("http.guard_timeout");
 /// A streaming response body failed after its head was already on the wire;
 /// the body ends where it broke, so only the log says so.
 pub const STREAM_FAILED: LogEvent = LogEvent::new("http.stream_failed");
+/// A handler put a `content-length` the edge cannot trust on a streamed
+/// response, so it was dropped and hyper framed the body instead; `value` is
+/// the received text.
+pub const CONTENT_LENGTH_INVALID: LogEvent = LogEvent::new("http.content_length_invalid");
+/// A peer already holds `max_connections_per_client` connections; its new
+/// connection is closed at once. `peer` is the address, `limit` the cap.
+pub const CONNECTIONS_FULL: LogEvent = LogEvent::new("http.connections_full");
+/// A response write made no progress for `send_stall_timeout`: the peer took
+/// its bytes away without closing the connection (or the network quietly
+/// died), so the connection is failed and its slot released. `peer` is the
+/// address, `ms` the bound that expired.
+pub const SEND_STALL: LogEvent = LogEvent::new("http.send_stall");

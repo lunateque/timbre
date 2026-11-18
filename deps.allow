@@ -15,3 +15,4 @@ bytes the buffer type hyper's bodies carry
 form_urlencoded decodes application/x-www-form-urlencoded POST bodies into query pairs
 percent-encoding decodes percent-escapes in request paths
 rusqlite SQLite bindings with the bundled C sources: the only store edge/sqlite speaks
+socket2 reading the accepted socket past tokio's API to arm TCP keepalive on served connections

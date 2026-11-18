@@ -3,6 +3,7 @@
 use crate::adapter;
 use crate::body;
 use crate::failures::HttpFailure;
+use crate::form;
 use crate::log_events::{GUARD_TIMEOUT, HANDLER_FAILED, HANDLER_TIMEOUT, PARAMS_REFUSED, REQUEST};
 use crate::params::{self, ParamsSource};
 use crate::proxy::{client_address, forwarded_for};
@@ -295,7 +296,11 @@ async fn read_and_merge(
         }
     };
     if is_form {
-        request.query.extend(adapter::form_pairs(&body));
+        // The merge parses the form bounded: at most `max_param_pairs + 1`
+        // pairs are materialized, so a `a&a&a...` body pays for the cap plus
+        // one pair before the refusal below answers 413 (see `crate::form`).
+        let url = std::mem::take(&mut request.query);
+        request.query = form::merge_form_pairs(url, &body, limits.config.max_param_pairs);
         if let Some((status, reason)) = params::refusal(
             &request.query,
             limits.config.max_param_pairs,

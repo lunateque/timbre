@@ -59,6 +59,10 @@ pub enum Body {
     /// lives across the guard's authentication await inside a future the
     /// HTTP edge spawns, so the borrowed body must cross threads by shared
     /// reference, not only by move.
+    ///
+    /// A stream is the one body whose size the HTTP edge cannot see, so it
+    /// is the one body whose `content-length` the edge honours: see
+    /// [`Response`].
     Stream(Pin<Box<dyn Chunks + Send + Sync>>),
 }
 
@@ -133,6 +137,15 @@ impl Request {
 }
 
 /// One outgoing response.
+///
+/// The HTTP edge owns the transfer framing: a `content-length`,
+/// `transfer-encoding`, `connection`, `keep-alive` or `upgrade` header set
+/// here is dropped so hyper frames the reply from the body it is handed.
+/// The exception is `content-length` on a [`Body::Stream`], which hyper
+/// cannot derive: when exactly one such header carries one well-formed
+/// length (ASCII digits a `u64` holds), the edge puts it on the wire and
+/// the stream must produce exactly that many bytes; anything else the
+/// handler declares is dropped like the rest of the framing headers.
 pub struct Response {
     /// The HTTP status.
     pub status: u16,

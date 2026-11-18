@@ -7,7 +7,7 @@ pub(crate) const MAX_PARAM_KEY_BYTES: usize = 256;
 
 /// The most one logged query or form value may occupy; the rest of a long
 /// value tells the reader nothing the head did not.
-const MAX_LOGGED_VALUE_BYTES: usize = 120;
+pub(crate) const MAX_LOGGED_VALUE_BYTES: usize = 120;
 
 /// The most the whole logged target may occupy, so one request cannot push
 /// an unbounded string into every log reader.
@@ -158,13 +158,20 @@ pub(crate) fn redacted_target(target: &str) -> String {
     let Some((path, query)) = target.split_once('?') else {
         return clip(target, MAX_LOGGED_TARGET_BYTES);
     };
-    logged_target(path, &crate::adapter::form_pairs(query.as_bytes()))
+    // The raw query of a target is already bounded by hyper's 64 KiB URI cap
+    // and every logged value is clipped downstream, so the redaction pass may
+    // parse it whole; the bound that must hold at parse time is the form
+    // body's, in `merge_form_pairs`.
+    logged_target(
+        path,
+        &crate::form::form_pairs(query.as_bytes(), usize::MAX).0,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::adapter::form_pairs;
+    use crate::form::form_pairs;
 
     #[test]
     fn secret_keys_are_caught_by_word_and_by_name() {
@@ -195,7 +202,7 @@ mod tests {
 
     #[test]
     fn secret_values_redact_and_others_pass_through() {
-        let pairs = form_pairs(b"u=anna&p=secret&apiKey=3f&t=deadbeef&s=cafe&sid=7&x=1");
+        let pairs = form_pairs(b"u=anna&p=secret&apiKey=3f&t=deadbeef&s=cafe&sid=7&x=1", 10).0;
         assert_eq!(
             redacted_query(&pairs),
             "u=anna&p=***&apiKey=***&t=***&s=***&sid=***&x=1"
@@ -225,7 +232,7 @@ mod tests {
 
     #[test]
     fn the_whole_logged_target_is_capped() {
-        let query = form_pairs("a=1&".repeat(1000).as_bytes());
+        let query = form_pairs("a=1&".repeat(1000).as_bytes(), 1000).0;
         let logged = logged_target("/long", &query);
         assert!(logged.len() <= 2048 + ELLIPSIS.len_utf8());
         assert!(logged.ends_with(ELLIPSIS));

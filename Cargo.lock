@@ -515,6 +515,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "percent-encoding",
+ "socket2",
  "timbre-edge-config",
  "timbre-kernel",
  "tokio",

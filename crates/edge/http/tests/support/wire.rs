@@ -21,6 +21,7 @@ pub(crate) fn read_until_end(stream: &mut TcpStream) -> String {
                     error.kind(),
                     ErrorKind::UnexpectedEof
                         | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
                         | ErrorKind::BrokenPipe
                         | ErrorKind::WouldBlock
                         | ErrorKind::TimedOut
@@ -111,6 +112,7 @@ pub(crate) fn wait_for_status(stream: &mut TcpStream) -> Option<String> {
                     error.kind(),
                     ErrorKind::UnexpectedEof
                         | ErrorKind::ConnectionReset
+                        | ErrorKind::ConnectionAborted
                         | ErrorKind::BrokenPipe
                         | ErrorKind::WouldBlock
                         | ErrorKind::TimedOut

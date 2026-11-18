@@ -209,6 +209,16 @@ fn headers_and_form_gate(data: &[u8], query: &[(String, String)]) {
 /// inside them panics.
 pub fn form_roundtrip(data: &[u8]) {
     let pairs = timbre_edge_http::fuzzing::form_pairs(data);
+    // The bounded parse the server runs is a prefix of the full one, and it
+    // says `more` exactly when pairs were left out.
+    let budget = usize::from(data.first().copied().unwrap_or(0) % 8);
+    let (bounded, more) = timbre_edge_http::fuzzing::form_pairs_bounded(data, budget);
+    assert_eq!(
+        bounded.as_slice(),
+        pairs.get(..bounded.len()).unwrap_or_default()
+    );
+    assert_eq!(bounded.len(), pairs.len().min(budget));
+    assert_eq!(more, pairs.len() > budget);
     let encoded: String = {
         let mut serializer = form_urlencoded::Serializer::new(String::new());
         for (key, value) in &pairs {

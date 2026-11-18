@@ -2,6 +2,7 @@
 //! and wedged sinks.
 
 mod inline;
+mod sink;
 
 use super::*;
 use crate::registry::Kernel;
@@ -325,7 +326,7 @@ fn the_dropped_lines_report_bypasses_the_module_filter() {
     );
     let count: usize = crate::testing::json_field(report, "count")
         .expect("a count field")
-        .parse()
+        .parse::<usize>()
         .expect("a numeric count");
     assert!(count > 0, "the overflow dropped lines: {report}");
 }

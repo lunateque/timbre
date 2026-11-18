@@ -248,11 +248,17 @@ impl Database {
         crate::files::restrict_to_owner(to)
     }
 
-    /// The copy itself, once the destination exists exclusively: open it
-    /// with the backup API and page the live database across.
+    /// The copy itself; `NOFOLLOW` refuses a destination swapped to a symlink.
     fn copy_backup(&self, to: &Path) -> Fallible {
         let writer = self.writer.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut destination = Connection::open(to).map_err(open_error)?;
+        let mut destination = Connection::open_with_flags(
+            to,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_CREATE
+                | OpenFlags::SQLITE_OPEN_NO_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(open_error)?;
         let backup =
             rusqlite::backup::Backup::new(&writer, &mut destination).map_err(query_error)?;
         // 100 pages per step with no pause: a CLI backup may take its time,

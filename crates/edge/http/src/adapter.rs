@@ -107,14 +107,6 @@ pub(crate) fn is_form_post(method: &str, content_type: Option<&[u8]>) -> bool {
         })
 }
 
-/// The pairs of an `application/x-www-form-urlencoded` body, in wire order.
-#[must_use]
-pub(crate) fn form_pairs(body: &[u8]) -> Vec<(String, String)> {
-    form_urlencoded::parse(body)
-        .into_owned()
-        .collect::<Vec<(String, String)>>()
-}
-
 /// The request headers as the kernel shape sees them: names lowercased,
 /// values raw bytes; the values of one name keep their receipt order, but
 /// the order across different names is not guaranteed, because hyper groups
@@ -329,14 +321,6 @@ mod tests {
             "/",
             "`..` empties the stack; that is not a climb above the root"
         );
-    }
-
-    #[test]
-    fn form_pairs_keep_order_and_decode() {
-        let body = b"q=%D0%BF%D0%BE%D0%B8%C1%81k&n=1&q=two";
-        let pairs = form_pairs(body);
-        assert_eq!(pairs.len(), 3, "repeated keys survive");
-        assert_eq!(pairs[2], ("q".to_owned(), "two".to_owned()));
     }
 
     #[test]

@@ -35,7 +35,10 @@ impl Bus {
     }
 
     /// Call every handler of `S` in registration order. A failing handler is
-    /// logged and does not stop the others nor fail the publisher.
+    /// logged and does not stop the others nor fail the publisher; a handler
+    /// that panics is caught the same way, because a rejection path that
+    /// unwinds through its publisher (say, every failed login) would turn one
+    /// module's bug into a lost connection for the client.
     pub(crate) fn publish<S: Signal>(&self, ctx: &Ctx, signal: &S) {
         let Some(entry) = self.handlers.get(&TypeId::of::<S>()) else {
             return;
@@ -44,14 +47,29 @@ impl Bus {
             return;
         };
         for handler in handlers {
-            if let Err(failure) = handler(ctx, signal) {
-                crate::log!(
+            // `AssertUnwindSafe`: the bus only hands out shared borrows, and a
+            // handler that panicked mid-way left nothing mutable behind here.
+            let outcome =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| handler(ctx, signal)));
+            match outcome {
+                Ok(Ok(())) => {}
+                Ok(Err(failure)) => crate::log!(
                     ctx,
                     warn,
                     HANDLER_FAILED,
                     signal = std::any::type_name::<S>(),
-                    code = failure.code().as_str()
-                );
+                    code = failure.code().as_str(),
+                    panicked = false
+                ),
+                Err(_) => crate::log!(
+                    ctx,
+                    warn,
+                    HANDLER_FAILED,
+                    signal = std::any::type_name::<S>(),
+                    // The panic payload may be anything a module threw; the
+                    // bus names the handler that ran, which is what is stable.
+                    panicked = true
+                ),
             }
         }
     }
@@ -68,6 +86,32 @@ mod tests {
 
     struct Ping;
     impl Signal for Ping {}
+
+    struct Panics;
+    impl Signal for Panics {}
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "handlers must have the `Handler<Panics>` signature"
+    )]
+    fn panics(_: &Ctx, _: &Panics) -> Fallible {
+        // A caller-visible bug: an unchecked slice index past the end, the
+        // way a handler with a hidden assumption breaks at runtime.
+        let empty: Vec<u8> = Vec::new();
+        let _ = empty[0];
+        Ok(())
+    }
+
+    #[expect(
+        clippy::unnecessary_wraps,
+        reason = "handlers must have the `Handler<Panics>` signature"
+    )]
+    fn remembers(ctx: &Ctx, _: &Panics) -> Fallible {
+        if let Some(recorder) = ctx.ports().get::<dyn Recorder>() {
+            recorder.push("second");
+        }
+        Ok(())
+    }
 
     fn first(ctx: &Ctx, _: &Ping) -> Fallible {
         if let Some(recorder) = ctx.ports().get::<dyn Recorder>() {
@@ -120,6 +164,42 @@ mod tests {
         assert!(
             line.contains(r#""code":"kernel.log_filter_invalid""#),
             "got {line}"
+        );
+    }
+
+    #[test]
+    fn a_panicking_handler_costs_only_itself() {
+        let sink = Shared::default();
+        let recorder = Arc::new(RecorderImpl::default());
+        let mut registry = Registry::new();
+        registry
+            .provide::<dyn Recorder>(Arc::clone(&recorder) as Arc<dyn Recorder>)
+            .expect("first provider");
+        registry.on::<Panics>(panics);
+        registry.on::<Panics>(remembers);
+        let kernel = registry.finish(
+            Logger::new(
+                LogFilter::default(),
+                Format::Json,
+                Box::new(sink.clone()),
+                fixed,
+            ),
+            Arc::new(ThreadRuntime::new()),
+        );
+        // The caller survives: `publish` is synchronous and unwound nothing.
+        Ctx::root(&kernel).publish(&Panics);
+        kernel.logger().flush();
+        assert_eq!(
+            RecorderImpl::entries(&recorder),
+            ["second"],
+            "the handler after the panic still ran"
+        );
+        let reports = sink.lines_for(HANDLER_FAILED.as_str());
+        assert_eq!(reports.len(), 1, "one line names the failed handler");
+        let line = reports.first().expect("one line");
+        assert!(
+            line.contains(r#""panicked":true"#),
+            "the line says the handler panicked: {line}"
         );
     }
 

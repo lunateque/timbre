@@ -34,6 +34,9 @@ pub struct Logger {
     /// stayed locked past the 50 ms inline bound. Shared with the writer
     /// thread so both feed one `kernel.log_dropped` report.
     dropped: Arc<AtomicU64>,
+    /// Dropped audit lines (`write_always`), counted apart so the audit gap
+    /// gets its own unfiltered `kernel.audit_dropped` report.
+    audit_dropped: Arc<AtomicU64>,
     /// `None` only when the OS refused the writer thread; lines are then written inline.
     queue: Option<Queue>,
 }
@@ -52,13 +55,21 @@ impl Logger {
     ) -> Self {
         let sink: Arc<Sink> = Arc::new(Mutex::new(sink));
         let dropped = Arc::new(AtomicU64::new(0));
-        let queue = Queue::start(Arc::clone(&sink), format, clock, Arc::clone(&dropped));
+        let audit_dropped = Arc::new(AtomicU64::new(0));
+        let queue = Queue::start(
+            Arc::clone(&sink),
+            format,
+            clock,
+            Arc::clone(&dropped),
+            Arc::clone(&audit_dropped),
+        );
         Self {
             filter,
             format,
             clock,
             sink,
             dropped,
+            audit_dropped,
             queue,
         }
     }
@@ -96,15 +107,16 @@ impl Logger {
         if !self.enabled(level, event.module()) {
             return;
         }
-        self.write_unfiltered(request, level, event, fields);
+        self.write_unfiltered(request, level, event, fields, false);
     }
 
     /// Write one line at `warn` or `error` regardless of the filter, for the
     /// audit lines a running deployment must never lose to its log level
     /// (`kernel.auth_failed`, `kernel.access_denied`): security monitoring
-    /// reads these lines and a filter must not blind it. The dropped-lines
-    /// report is not written here; the log writer emits it from its own
-    /// thread.
+    /// reads these lines and a filter must not blind it. A dropped audit line
+    /// is counted apart from ordinary lines so the audit gap gets its own
+    /// `kernel.audit_dropped` report; the log writer emits both reports from
+    /// its own thread.
     pub(crate) fn write_always(
         &self,
         request: Option<RequestId>,
@@ -113,7 +125,7 @@ impl Logger {
         fields: &[(&'static str, &dyn LogValue)],
     ) {
         debug_assert!(level <= Level::Warn, "only urgent lines bypass the filter");
-        self.write_unfiltered(request, level, event, fields);
+        self.write_unfiltered(request, level, event, fields, true);
     }
 
     fn write_unfiltered(
@@ -122,17 +134,29 @@ impl Logger {
         level: Level,
         event: &LogEvent,
         fields: &[(&'static str, &dyn LogValue)],
+        audit: bool,
     ) {
         let line = render(self.format, (self.clock)(), level, event, request, fields);
         if level <= Level::Warn {
             if !write_line_bounded(&self.sink, &line, INLINE_SINK_WAIT) {
-                self.dropped.fetch_add(1, Ordering::Relaxed);
+                if audit {
+                    // An audit line the audit watcher must be told it never saw.
+                    self.audit_dropped.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                }
             }
             return;
         }
         match &self.queue {
             Some(queue) => queue.push(line),
-            None => write_line(&self.sink, &line),
+            // Without a writer thread the caller is the sink's only path: a
+            // refused line must be counted like a queue overflow.
+            None => {
+                if !write_line(&self.sink, &line) {
+                    self.dropped.fetch_add(1, Ordering::Relaxed);
+                }
+            }
         }
     }
 
@@ -151,9 +175,10 @@ impl Logger {
 
 /// Write one inline line, waiting at most `bound` for the sink mutex with a
 /// growing sleep between attempts. `false` when the mutex stayed locked past
-/// the bound: the line was not written and the caller counts it dropped.
-/// Logging never fails the caller, so sink errors are dropped like everywhere
-/// else. A poisoned mutex is taken anyway, as in `write_line`.
+/// the bound, or when the write or flush failed: the line did not reach the
+/// sink, and the caller counts it dropped. Logging never fails the caller,
+/// so sink errors are reported only through that count. A poisoned mutex is
+/// taken anyway, as in `write_line`.
 fn write_line_bounded(sink: &Sink, line: &str, bound: Duration) -> bool {
     let deadline = Instant::now() + bound;
     let mut delay = Duration::from_micros(50);
@@ -172,6 +197,7 @@ fn write_line_bounded(sink: &Sink, line: &str, bound: Duration) -> bool {
             }
         }
     };
-    let _ = sink.write_all(line.as_bytes()).and_then(|()| sink.flush());
-    true
+    sink.write_all(line.as_bytes())
+        .and_then(|()| sink.flush())
+        .is_ok()
 }

@@ -33,6 +33,16 @@ pub struct HttpConfig {
     /// The largest number of query+form pairs one request may carry; more
     /// answers 414 (URL), 413 (form).
     pub max_param_pairs: usize,
+    /// How many connections one client address may hold at once; a peer over
+    /// the cap is closed at once. Peers listed in `trusted_proxies` are
+    /// exempt: behind a proxy every client shares the proxy's address. A
+    /// configured `0` clamps to 1: zero would refuse every peer forever.
+    pub max_connections_per_client: usize,
+    /// How long a response write may make no progress at all before the
+    /// connection is failed. Generous by default: a paused player legitimately
+    /// stops reading, a dead peer without a readable network does not write
+    /// anything ever again.
+    pub send_stall_timeout: Duration,
 }
 
 impl Default for HttpConfig {
@@ -46,6 +56,8 @@ impl Default for HttpConfig {
             handler_timeout: Duration::from_secs(60),
             guard_timeout: Duration::from_secs(10),
             max_param_pairs: 1024,
+            max_connections_per_client: 64,
+            send_stall_timeout: Duration::from_millis(300_000),
         }
     }
 }
@@ -71,6 +83,10 @@ pub(crate) struct HttpSection {
     pub body_read_timeout_ms: Option<u64>,
     /// The cap of query+form pairs.
     pub max_param_pairs: Option<usize>,
+    /// The per-client concurrent connection cap.
+    pub max_connections_per_client: Option<usize>,
+    /// The send-stall timeout, in milliseconds.
+    pub send_stall_timeout_ms: Option<u64>,
 }
 
 impl HttpConfig {
@@ -106,6 +122,14 @@ impl HttpConfig {
             handler_timeout: milliseconds(section.handler_timeout_ms, defaults.handler_timeout),
             guard_timeout: milliseconds(section.guard_timeout_ms, defaults.guard_timeout),
             max_param_pairs: section.max_param_pairs.unwrap_or(defaults.max_param_pairs),
+            max_connections_per_client: section
+                .max_connections_per_client
+                .unwrap_or(defaults.max_connections_per_client)
+                .max(1),
+            send_stall_timeout: milliseconds(
+                section.send_stall_timeout_ms,
+                defaults.send_stall_timeout,
+            ),
         }
     }
 }
@@ -152,18 +176,32 @@ mod tests {
     #[test]
     fn a_timeout_from_the_file_reaches_the_config() {
         let file = File::with(
-            "[http]\nhandler_timeout_ms = 250\nguard_timeout_ms = 40\nmax_param_pairs = 7\n",
+            "[http]\nhandler_timeout_ms = 250\nguard_timeout_ms = 40\nmax_param_pairs = 7\nsend_stall_timeout_ms = 90000\nmax_connections_per_client = 9\n",
         );
         let http = HttpConfig::from_config(&file.config()).expect("the section parses");
         assert_eq!(http.handler_timeout, Duration::from_millis(250));
         assert_eq!(http.guard_timeout, Duration::from_millis(40));
         assert_eq!(http.max_param_pairs, 7);
+        assert_eq!(http.send_stall_timeout, Duration::from_secs(90));
+        assert_eq!(http.max_connections_per_client, 9);
         assert_eq!(
             http.body_read_timeout,
             HttpConfig::default().body_read_timeout,
             "absent keys keep their defaults"
         );
         assert_eq!(http.listen, HttpConfig::default().listen);
+    }
+
+    #[test]
+    fn a_zero_per_client_cap_clamps_to_one() {
+        // Zero would refuse every peer forever: every accept is over a cap
+        // of zero, so even the first connection of an address would die.
+        let file = File::with("[http]\nmax_connections_per_client = 0\n");
+        let http = HttpConfig::from_config(&file.config()).expect("the section parses");
+        assert_eq!(
+            http.max_connections_per_client, 1,
+            "a configured zero still lets one connection through"
+        );
     }
 
     #[test]
