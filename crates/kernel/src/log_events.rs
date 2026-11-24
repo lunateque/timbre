@@ -15,6 +15,12 @@ pub const JOB_FINISHED: LogEvent = LogEvent::new("kernel.job_finished");
 pub const JOB_FAILED: LogEvent = LogEvent::new("kernel.job_failed");
 /// A credential check was rejected; the secret itself is never logged.
 pub const AUTH_FAILED: LogEvent = LogEvent::new("kernel.auth_failed");
+/// The number of checks refused by the limiter for a client this interval.
+pub const AUTH_THROTTLED: LogEvent = LogEvent::new("kernel.auth_throttled");
+/// Refusals beyond the per-interval cap on distinct client summaries.
+pub const AUTH_THROTTLED_UNTRACKED: LogEvent = LogEvent::new("kernel.auth_throttled_untracked");
+/// No credential provider owns the kind presented by a client.
+pub const AUTH_UNSUPPORTED: LogEvent = LogEvent::new("kernel.auth_unsupported");
 /// A recognized identity lacked the permission a guarded route requires.
 pub const ACCESS_DENIED: LogEvent = LogEvent::new("kernel.access_denied");
 /// The writer dropped log lines while the sink lagged; `count` says how many.

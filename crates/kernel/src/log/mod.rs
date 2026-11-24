@@ -5,7 +5,7 @@ mod format;
 mod logger;
 #[cfg(test)]
 mod tests;
-mod time;
+pub(crate) mod time;
 mod value;
 mod writer;
 

@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 timbre-kernel.workspace = true
+timbre-audit = { workspace = true, optional = true }
+timbre-auth = { workspace = true, optional = true }
+timbre-auth_guard = { workspace = true, optional = true }
 timbre-edge-config.workspace = true
 timbre-edge-http.workspace = true
 timbre-edge-runtime.workspace = true
@@ -20,7 +23,14 @@ timbre-hello = { workspace = true, optional = true }
 timbre-library = { workspace = true, optional = true }
 
 [features]
-default = ["folders", "hello", "library"]
+default = ["audit", "auth", "auth_guard", "folders", "hello", "library"]
+audit = ["dep:timbre-audit"]
+auth = ["dep:timbre-auth"]
+auth_guard = ["dep:timbre-auth_guard"]
 folders = ["dep:timbre-folders"]
 hello = ["dep:timbre-hello"]
 library = ["dep:timbre-library"]
+
+[[test]]
+name = "auth_cli"
+required-features = ["auth"]

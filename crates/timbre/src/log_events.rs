@@ -25,16 +25,9 @@ pub(crate) const DATABASE_FAILED: LogEvent = LogEvent::new("timbre.database_fail
     expect(dead_code, reason = "only unix reports directory permissions")
 )]
 pub(crate) const DATA_DIR_PERMISSIVE: LogEvent = LogEvent::new("timbre.data_dir_permissive");
-/// One line of `timbre help`: `name` and `help`.
-pub(crate) const HELP: LogEvent = LogEvent::new("timbre.help");
 /// A CLI handler returned a failure; the code names it.
 pub(crate) const COMMAND_FAILED: LogEvent = LogEvent::new("timbre.command_failed");
 /// The command line itself is unusable: `reason` says why, exit is 2.
 pub(crate) const USAGE: LogEvent = LogEvent::new("timbre.usage");
-/// `timbre db check` finished: `ok` says whether the integrity check passed.
+/// `timbre db check` found corruption or could not finish.
 pub(crate) const DB_CHECK: LogEvent = LogEvent::new("timbre.db_check");
-/// `timbre db backup` finished: `to` names the destination.
-pub(crate) const DB_BACKUP: LogEvent = LogEvent::new("timbre.db_backup");
-/// `timbre db prune`: `tables` lists unowned table names, `dropped` says
-/// whether they were removed (only with `--yes`).
-pub(crate) const DB_PRUNE: LogEvent = LogEvent::new("timbre.db_prune");

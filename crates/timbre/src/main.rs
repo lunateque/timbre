@@ -99,15 +99,18 @@ fn main() -> ExitCode {
     } else {
         let kernel =
             registry.finish_with_resources(logger, Arc::new(ThreadRuntime::new()), resources);
-        let ctx = Ctx::root(&kernel);
+        if let Err(failure) = kernel.check_config() {
+            return fatal(&CONFIG_FAILED, &*failure);
+        }
+        let ctx = Ctx::root(&kernel).for_cli();
         // Command handlers are futures driven on this thread: that is what
         // the kernel's `block_on` is for, and why the command path finishes
         // the kernel with a `ThreadRuntime`.
         let dispatched = timbre_kernel::block_on(commands::dispatch(&ctx, &kernel, &args));
-        // The command's last lines (help text, `db` results) sit in the
-        // async queue: drain it before the exit code leaves `main`.
+        let outcome = commands::classify(&ctx, dispatched);
+        // Drain diagnostic logs before the exit code leaves `main`.
         kernel.flush_log();
-        match commands::classify(dispatched) {
+        match outcome {
             commands::Outcome::Success => Ok(ExitCode::SUCCESS),
             commands::Outcome::Usage => Ok(ExitCode::from(2)),
             commands::Outcome::Reported => Ok(ExitCode::FAILURE),
@@ -135,18 +138,27 @@ async fn serve_with(
         Arc::clone(&runtime) as Arc<dyn timbre_kernel::Runtime>,
         resources,
     );
+    if let Err(failure) = kernel.check_config() {
+        return Ok(fatal(&CONFIG_FAILED, &*failure));
+    }
     let ctx = Ctx::root(&kernel);
     let dispatched = commands::dispatch(&ctx, &kernel, args).await;
+    runtime.trigger_shutdown();
     // Jobs get the spec's shutdown grace: up to ten seconds to finish their
     // current work before the process leaves. A job still running after it
     // is dropped with the runtime; every database write is one transaction,
     // so nothing is left half-done. The answer says only whether they all
     // made it, which changes no part of an already-stopped server's exit.
     let _ = kernel.wait_jobs(std::time::Duration::from_secs(10));
+    // Serving started, so the journal and anything else listening gets its
+    // last pass whether the serve ended cleanly or with a failure.
+    ctx.publish(&timbre_kernel::signals::ServerDrained);
+    log!(ctx, info, log_events::STOPPED);
+    let outcome = commands::classify(&ctx, dispatched);
     // The last request lines live in the async queue: drain it before the
     // process moves on to (or returns) its exit code.
     kernel.flush_log();
-    match commands::classify(dispatched) {
+    match outcome {
         commands::Outcome::Success => Ok(ExitCode::SUCCESS),
         commands::Outcome::Usage => Ok(ExitCode::from(2)),
         commands::Outcome::Reported => Ok(ExitCode::FAILURE),

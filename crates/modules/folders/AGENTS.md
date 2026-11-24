@@ -18,6 +18,7 @@ None.
 - `folders.not_available`: no `LibraryTree` is registered.
 - `folders.not_found`: the requested root or directory is absent or hidden.
   A `LibraryTree` provider's own `not_found` is translated into this code.
-- `folders.invalid_cursor`: browse pagination cursor is malformed.
-- `folders.page_too_large`: the requested `limit` is above the kernel's
-  `MAX_PAGE_LIMIT` (500). The page is refused, never silently shortened.
+- Paging errors come from the kernel: `kernel.page_too_large` for a `limit`
+  above `MAX_PAGE_LIMIT` (500), refused, never silently shortened, and
+  `kernel.cursor_invalid` for a malformed cursor. Roots pass the opaque
+  cursor through to `LibraryTree`.

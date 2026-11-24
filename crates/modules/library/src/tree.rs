@@ -1,14 +1,14 @@
 use crate::Library;
 use crate::config::shared_db;
-use crate::store::{Window, all, id, one, row_path, unsigned, window};
+use crate::store::{all, id, one, row_path, unsigned};
 use timbre_edge_sqlite::rusqlite::types::Type;
 use timbre_edge_sqlite::rusqlite::{Connection, Error, params};
 use timbre_kernel::library_tree::{Folder, FolderEntry, LibraryFile, LibraryRoot, LibraryTree};
-use timbre_kernel::{Ctx, Fallible, Page, PageRequest};
+use timbre_kernel::{Ctx, Fallible, Page, PageRequest, page::Window};
 
 impl LibraryTree for Library {
     fn roots(&self, ctx: &Ctx, page: PageRequest<'_>) -> Fallible<Page<LibraryRoot>> {
-        let win = window(page)?;
+        let win = Window::new(page)?;
         shared_db(ctx)?.get(ctx)?.read(|sql| {
             let roots = all(sql, "SELECT r.id,f.id,r.path FROM library_roots r JOIN library_folders f ON f.root_id=r.id WHERE f.parent_id IS NULL ORDER BY r.ordinal,r.id LIMIT ?1 OFFSET ?2", params![win.limit(), win.skip()], |row| Ok(LibraryRoot { id: row.get::<_, i64>(0)?.to_string(), folder_id: row.get::<_, i64>(1)?.to_string(), path: row_path(row, 2)? }))?;
             Ok(win.page(roots))
@@ -16,7 +16,7 @@ impl LibraryTree for Library {
     }
 
     fn folder(&self, ctx: &Ctx, folder: &str, page: PageRequest<'_>) -> Fallible<Folder> {
-        let win = window(page)?;
+        let win = Window::new(page)?;
         let folder = id(folder)?;
         shared_db(ctx)?
             .get(ctx)?

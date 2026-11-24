@@ -21,7 +21,9 @@ artist = [" feat. ", " ft. "]
 ```
 
 `scan` reconciles folder hashes; `scan --full` rereads tags without changing
-identity. `library explain <path>` traces the saved grouping key, credits, art,
+identity. A `scan` that shutdown interrupted leaves a consistent index and
+says so ("Library scan stopped.") instead of claiming a complete pass.
+`library explain <path>` traces the saved grouping key, credits, art,
 lyrics and diagnostics. A user initiating a scan needs `library.scan`. Ignore
 markers are reported on folders for consumers; they do not hide catalog tracks.
 Artwork rows store hashes and source locators, never image bodies. Originals
@@ -37,7 +39,7 @@ watching and text normalization.
 
 ## Jobs
 
-`library.scan` is the optional startup scan. `library.watch` queues the paths
+`library.scan_run` is the optional startup scan. `library.watch` queues the paths
 a watcher reports, ingests each one once its size and modification time have
 held still across two observations two seconds apart, and reconciles the
 whole tree after an overflow. Paths that are not audio, image, lyric or

@@ -32,7 +32,7 @@ pub mod fuzzing {
     }
 }
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use timbre_kernel::artwork::Artwork;
 use timbre_kernel::catalog::{Catalog, ScanStatus};
 use timbre_kernel::library_tree::LibraryTree;
@@ -44,6 +44,7 @@ const SCAN_PERMISSION: Permission = Permission::new("library.scan");
 struct Library {
     scan: Mutex<ScanStatus>,
     art: art::ArtCache,
+    settings: OnceLock<Arc<config::Settings>>,
 }
 
 impl Port for Library {}
@@ -54,11 +55,16 @@ impl Port for Library {}
 /// the trait rather than the state keeps `Library` itself out of it.
 trait LibraryState: Port {
     fn scan(&self) -> &Mutex<ScanStatus>;
+    fn settings(&self) -> &OnceLock<Arc<config::Settings>>;
 }
 
 impl LibraryState for Library {
     fn scan(&self) -> &Mutex<ScanStatus> {
         &self.scan
+    }
+
+    fn settings(&self) -> &OnceLock<Arc<config::Settings>> {
+        &self.settings
     }
 }
 
@@ -68,11 +74,27 @@ fn state(ctx: &Ctx) -> Fallible<Arc<dyn LibraryState>> {
         .ok_or_else(|| failures::LibraryFailure::NotConfigured.boxed())
 }
 
+fn configure(ctx: &Ctx) -> Fallible {
+    let library = state(ctx)?;
+    let _ = library
+        .settings()
+        .set(Arc::new(config::Settings::load(ctx)?));
+    Ok(())
+}
+
+fn settings(library: &dyn LibraryState) -> Fallible<&Arc<config::Settings>> {
+    library
+        .settings()
+        .get()
+        .ok_or_else(|| failures::LibraryFailure::NotConfigured.boxed())
+}
+
 /// Register the catalog, tree, artwork, migration, jobs, and commands.
 ///
 /// # Errors
 /// Returns a registration failure when a declaration conflicts.
 pub fn register(registry: &mut Registry) -> Fallible {
+    registry.config_check(configure);
     let library = Arc::new(Library::default());
     registry.provide::<dyn Catalog>(library.clone())?;
     registry.provide::<dyn Artwork>(library.clone())?;
@@ -80,7 +102,7 @@ pub fn register(registry: &mut Registry) -> Fallible {
     registry.provide::<dyn LibraryState>(library)?;
     registry.migration("library", 1, include_str!("schema.sql"))?;
     registry.permission(SCAN_PERMISSION, "Run a library scan")?;
-    registry.job(log_events::SCAN, jobs::scan)?;
+    registry.job(log_events::SCAN_RUN, jobs::scan)?;
     registry.job(log_events::WATCH, jobs::watch)?;
     registry.command(
         "scan",

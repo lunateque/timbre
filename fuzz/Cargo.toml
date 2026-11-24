@@ -32,6 +32,7 @@ fuzz-targets = ["dep:libfuzzer-sys"]
 [dependencies]
 form_urlencoded = "1.2.2"
 libfuzzer-sys = { version = "0.4.13", optional = true }
+timbre-auth = { path = "../crates/modules/auth", features = ["fuzzing"] }
 timbre-edge-http = { path = "../crates/edge/http", features = ["fuzzing"] }
 timbre-edge-image = { path = "../crates/edge/image", features = ["fuzzing"] }
 timbre-edge-tags = { path = "../crates/edge/tags", features = ["fuzzing"] }
@@ -42,6 +43,14 @@ timbre-library = { path = "../crates/modules/library", features = ["fuzzing"] }
 [[bin]]
 name = "http_head"
 path = "fuzz_targets/http_head.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "api_key_parse"
+path = "fuzz_targets/api_key_parse.rs"
 required-features = ["fuzz-targets"]
 test = false
 doc = false

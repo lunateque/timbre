@@ -18,8 +18,8 @@ pub const NOT_CONFIGURED: FailureCode = FailureCode::new("library.not_configured
 pub const FORBIDDEN: FailureCode = FailureCode::new("library.forbidden");
 /// A file or working thread could not be opened.
 pub const IO_FAILED: FailureCode = FailureCode::new("library.io_failed");
-/// A command or paging argument was invalid.
-pub const ARGUMENT_INVALID: FailureCode = FailureCode::new("library.argument_invalid");
+/// A setting in `[library]` is unusable.
+pub const INVALID_CONFIG: FailureCode = FailureCode::new("library.invalid_config");
 
 pub(crate) enum LibraryFailure {
     NotFound,
@@ -30,7 +30,7 @@ pub(crate) enum LibraryFailure {
     NotConfigured,
     Forbidden,
     Io(std::io::Error),
-    Argument,
+    InvalidConfig,
 }
 
 impl std::fmt::Debug for LibraryFailure {
@@ -54,7 +54,7 @@ impl Failure for LibraryFailure {
             Self::NotConfigured => NOT_CONFIGURED,
             Self::Forbidden => FORBIDDEN,
             Self::Io(_) => IO_FAILED,
-            Self::Argument => ARGUMENT_INVALID,
+            Self::InvalidConfig => INVALID_CONFIG,
         }
     }
 
@@ -64,9 +64,8 @@ impl Failure for LibraryFailure {
             Self::ScanRunning => 409,
             Self::ImageTooLarge => 413,
             Self::Forbidden => 403,
-            Self::Argument => 400,
             Self::NotConfigured | Self::RootInvalid(_) => 503,
-            Self::Io(_) | Self::ImageUnreadable => 500,
+            Self::Io(_) | Self::ImageUnreadable | Self::InvalidConfig => 500,
         }
     }
 
@@ -80,7 +79,9 @@ impl Failure for LibraryFailure {
             Self::NotConfigured => "The library is not configured.",
             Self::Forbidden => "You do not have permission to scan the library.",
             Self::Io(_) => "Library I/O failed.",
-            Self::Argument => "Invalid library argument.",
+            Self::InvalidConfig => {
+                "scan_workers must be at least 1 and tag names must not be empty"
+            }
         }
     }
 }

@@ -30,6 +30,14 @@ pub const COMMAND_INVALID: FailureCode = FailureCode::new("kernel.command_invali
 pub const MODULE_INVALID: FailureCode = FailureCode::new("kernel.module_invalid");
 /// A blocking closure panicked, so it produced no value.
 pub const BLOCKING_PANICKED: FailureCode = FailureCode::new("kernel.blocking_panicked");
+/// A command's arguments did not match its usage.
+pub const USAGE: FailureCode = FailureCode::new("kernel.usage");
+/// A command could not deliver its output.
+pub const OUTPUT_FAILED: FailureCode = FailureCode::new("kernel.output_failed");
+/// A requested page exceeded the shared limit.
+pub const PAGE_TOO_LARGE: FailureCode = FailureCode::new("kernel.page_too_large");
+/// A page cursor was malformed.
+pub const CURSOR_INVALID: FailureCode = FailureCode::new("kernel.cursor_invalid");
 
 /// Failures raised by the kernel itself.
 #[derive(Debug)]
@@ -110,6 +118,14 @@ pub enum KernelFailure {
     },
     /// A blocking closure panicked, so it produced no value.
     BlockingPanicked,
+    /// The static usage or diagnostic to show the caller.
+    Usage(&'static str),
+    /// A command's output writer returned an error.
+    OutputFailed(std::io::Error),
+    /// A requested page exceeded the shared limit.
+    PageTooLarge,
+    /// A page cursor was malformed.
+    CursorInvalid,
 }
 
 impl Failure for KernelFailure {
@@ -129,18 +145,31 @@ impl Failure for KernelFailure {
             Self::CommandInvalid { .. } => COMMAND_INVALID,
             Self::ModuleInvalid { .. } => MODULE_INVALID,
             Self::BlockingPanicked => BLOCKING_PANICKED,
+            Self::Usage(_) => USAGE,
+            Self::OutputFailed(_) => OUTPUT_FAILED,
+            Self::PageTooLarge => PAGE_TOO_LARGE,
+            Self::CursorInvalid => CURSOR_INVALID,
         }
     }
 
     fn status(&self) -> u16 {
-        // Startup failures precede any request; a blocking panic can happen while serving.
-        // Both are server faults, so every variant maps to 500.
-        500
+        if matches!(
+            self,
+            Self::Usage(_) | Self::PageTooLarge | Self::CursorInvalid
+        ) {
+            400
+        } else {
+            500
+        }
     }
 
     fn public_message(&self) -> &'static str {
         match self {
             Self::BlockingPanicked => "The server failed to finish a background task.",
+            Self::Usage(message) => message,
+            Self::OutputFailed(_) => "The command could not write its output.",
+            Self::PageTooLarge => "The requested page is too large.",
+            Self::CursorInvalid => "The page cursor is invalid.",
             Self::PortTaken { .. }
             | Self::ResourceTaken { .. }
             | Self::LogFilterInvalid

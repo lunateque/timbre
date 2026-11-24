@@ -9,14 +9,14 @@ Point Timbre at the music on your computer or NAS and listen through the apps yo
 [OpenSubsonic](https://opensubsonic.netlify.app). Every feature is a module you can pull out, and the server keeps
 running without it.
 
-> **Not ready to play music yet.** The core, the library scanner and the folder view are built; the OpenSubsonic API
-> and streaming come next. Follow the progress at [timbre.page](https://timbre.page).
+> **Not ready to play music yet.** The core, the library scanner, the folder view and user accounts with per-device
+> keys are built; the OpenSubsonic API and streaming come next. Follow the progress at [timbre.page](https://timbre.page).
 
 ## Modules
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://timbre.page/assets/readme/bank-dark.svg">
-  <img alt="Built: library, folders. Coming: stream, auth, subsonic, activity, sound, discover, llm-playlists." src="https://timbre.page/assets/readme/bank-light.svg" width="100%">
+  <img alt="Timbre's modules as a bank of keys; lit keys are built. The current list is on timbre.page." src="https://timbre.page/assets/readme/bank-light.svg" width="100%">
 </picture>
 
 Each module is a crate that registers with the kernel and talks to the others only through signals and ports the
@@ -33,8 +33,14 @@ cargo xtask module remove radio   # takes it out again
 cargo build --release
 ./target/release/timbre scan                       # read the folders in timbre.toml into the library
 ./target/release/timbre library explain <file>     # why a track landed in its album
+./target/release/timbre user add anuar --admin     # a user, with every permission
+./target/release/timbre device issue anuar phone   # a key for one device, printed once
+./target/release/timbre audit --since 2026-11-01   # the security journal: refusals, users and keys
 ./target/release/timbre serve                      # the server, with no protocol modules yet
 ```
+
+Device keys are stored only as SHA-256 digests. Failed logins are throttled per address and per user, and every
+refused login, denied request and user or key change lands in the journal for a year.
 
 A minimal `timbre.toml`:
 

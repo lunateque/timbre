@@ -31,30 +31,50 @@ receive a principal from the guard. The kernel knows no wire protocol —
 routes by `SchemeName` only, never interpreting its fields; a `Scheme`
 with an empty `user` names no user (the owner may derive one from its
 fields). User names are canonical `UserName`s: ASCII lowercase
-`[a-z0-9._-]`, 1-64 bytes, trimmed and lowercased from input by
+`[a-z0-9._-]` starting with `[a-z0-9]`, 1-64 bytes, trimmed and lowercased from input by
 `authenticate` before any throttle or provider sees them; an
-unnormalizable name is rejected as `invalid` without asking anyone, and
-the audit line carries the candidate clipped to 64 bytes at a char
-boundary. A forbidden request (recognized identity, missing permission)
+unnormalizable name is rejected as `invalid` after reserving by address only,
+without asking a provider. Its audit line carries the candidate clipped to
+64 bytes at a char boundary. A check abandoned before its verdict (a
+dropped future, a closed connection) settles its throttle reservation as a
+failure, so a cancelled attempt buys no free guess; it publishes no
+`AuthFailed` and writes no journal row, because no verdict ever said what
+went wrong. A forbidden request (recognized identity, missing permission)
 is audited: `kernel.access_denied` at `warn` regardless of the filter,
 plus the `AccessDenied` signal.
 
 ## Ports
 
-`Catalog`, `Artwork`, `LibraryTree` and `Folders` describe the music catalog,
-art, scanned directory tree and visible folder browsing respectively.
+`Catalog`, `Artwork`, `LibraryTree`, `Folders` and `Directory` describe the
+music catalog, art, scanned directory tree, visible folder browsing and the
+paged account/device listing respectively.
 Consumers must tolerate a port's absence. The host
 installs shared runtime resources at `Registry::finish_with_resources`;
 modules can read them with `Ctx::resource` but cannot register resources.
+The host calls `Kernel::check_config` after installing resources and before
+dispatching commands or starting jobs. Modules register one-time validation
+with `Registry::config_check` and retain the validated settings in their own
+state.
+
+CLI commands use `Ctx::say` for output independent of the log filter.
+`kernel.usage` denotes incorrect command usage and exits with status 2.
 The `Throttle` (brute-force limiting of credential checks) is deliberately not a port:
 exactly one may exist and only the kernel calls it, so it registers through
-`Registry::throttle`; its absence means no in-process limiting.
+`Registry::throttle`; its absence means no in-process limiting. The kernel
+reserves capacity before asking the provider and settles it exactly once,
+including when the check is cancelled.
 
 Every list method pages with a `Cursor` and serves at most
 `page::MAX_PAGE_LIMIT` (500) items; a larger `limit` is refused by the
 provider, never silently clamped. `Catalog::search` is the single exception to
 cursor paging: it takes a count and an offset per category, because one
 `search3` call asks for three independent windows at once.
+
+A port implementation decodes its request with `page::Window`:
+`Window::check_limit` refuses an oversize `limit` with
+`kernel.page_too_large`, `Window::from_offset` rejects a malformed cursor
+with `kernel.cursor_invalid`, and the window takes the lookahead row.
+Concurrent inserts or deletes can shift later offset pages.
 
 ## Test support
 
@@ -66,12 +86,19 @@ The edge crates still carry private copies of the same helpers.
 
 ## Signals
 
-Provides `signals::Started` (published by the binary once all modules are
-registered), `UserRemoved`, `DeviceIssued`, `DeviceRevoked`, `AuthFailed`
-(published by `Ctx::authenticate` after every rejection; its `user` is the
-canonical `UserName` or `None` when the given text was not a user name)
-and `AccessDenied` (published by the guard check after every forbidden
-request: client, canonical user, required permission).
+The built-in signals are:
+
+- `Started`, published by the binary before starting jobs.
+- `ServerDrained`, published by the binary only after a successful HTTP
+  return and the bounded shutdown wait for jobs.
+- `UserAdded`, `UserRemoved`, `PermissionsChanged`, `DeviceIssued` and
+  `DeviceRevoked`, published by the `auth` module; users are identified by
+  canonical `UserName`.
+- `AuthFailed`, published for credential rejections other than throttle
+  refusals; its `user` is the canonical `UserName` or `None` when the given
+  text was not a user name.
+- `AccessDenied`, published after every forbidden request: client, canonical
+  user, required permission.
 
 ## Failures
 
@@ -104,18 +131,31 @@ request: client, canonical user, required permission).
 - `kernel.blocking_panicked` (`KernelFailure::BlockingPanicked`): a closure
   run through `Ctx::blocking` panicked, so it produced no value; the awaiter
   receives this failure instead of waiting forever.
+- `kernel.usage` (`KernelFailure::Usage`): a CLI command was called wrongly;
+  the binary exits with status 2.
+- `kernel.output_failed` (`KernelFailure::OutputFailed`): a command's output
+  writer returned an IO error.
+- `kernel.page_too_large` / `kernel.cursor_invalid`
+  (`KernelFailure::PageTooLarge` / `CursorInvalid`): a page asked for more
+  than `MAX_PAGE_LIMIT` items, or its cursor did not decode; neither is a
+  usage failure, so a command reporting one exits with status 1.
 
 ## Log events
 
 Declared in `src/log_events.rs`. These are worth knowing about:
 
 - `kernel.auth_failed` (`warn`, fields `client`, `user`, `reason`): one line
-  per rejected credential. Written at `warn` regardless of the log filter,
+  per rejected credential except throttle refusals. Bypasses the log filter,
   like `kernel.access_denied` and `kernel.log_dropped`: fail2ban and the
   audit trail must not be blinded by a filter that hides `warn`, so the line
   arrives even with `TIMBRE_LOG=kernel=error` or quieter. The credential's
   secret never reaches the line; an unnormalizable user name reaches it
   clipped to `UserName::MAX_LENGTH` bytes at a char boundary.
+- `kernel.auth_throttled` (`warn`, fields `client`, `count`): one unfiltered
+  line per canonical address with a refusal during each one-minute interval.
+  Beyond 4096 distinct addresses in an interval, additional addresses share
+  one `kernel.auth_throttled_untracked` line. Refusals do not publish
+  `AuthFailed`.
 - `kernel.access_denied` (`warn`, fields `client`, `user`, `permission`):
   one line per forbidden request — a recognized identity that does not hold
   the permission a guarded route requires. Written unconditionally like the

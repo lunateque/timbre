@@ -2,29 +2,6 @@
 
 use crate::names;
 
-/// The stable identifier of a user.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct UserId(String);
-
-impl UserId {
-    /// Wrap an identifier chosen by the module that owns users.
-    pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
-    }
-
-    /// The identifier as text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl std::fmt::Display for UserId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
 /// A declared capability, shaped `<module>.<snake_case_name>` and validated
 /// exactly like a [`LogEvent`](crate::LogEvent), e.g. `auth.admin`, `library.scan`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -80,10 +57,13 @@ const fn is_name_byte(byte: u8) -> bool {
 const fn is_valid_user_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let len = bytes.len();
-    if len == 0 || len > MAX_USER_NAME_BYTES {
+    let [b'a'..=b'z' | b'0'..=b'9', tail @ ..] = bytes else {
+        return false;
+    };
+    if len > MAX_USER_NAME_BYTES {
         return false;
     }
-    let mut rest = bytes;
+    let mut rest = tail;
     while let [byte, tail @ ..] = rest {
         // Names are lowercased before this runs, so an uppercase byte fails.
         if !is_name_byte(*byte) {
@@ -94,8 +74,9 @@ const fn is_valid_user_name(name: &str) -> bool {
     true
 }
 
-/// A user name in the kernel's one canonical spelling: 1 to 64 bytes of ASCII
-/// lowercase letters, digits, `.`, `_` and `-`.
+/// A user name in the kernel's one canonical spelling: 1 to 64 ASCII bytes.
+/// It starts with a lowercase letter or digit; subsequent bytes may also
+/// be `.`, `_` or `-`.
 /// [`UserName::normalize`] is the only way in from arbitrary text,
 /// so throttling, audit and logs always see the same string for one account.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -106,9 +87,9 @@ impl UserName {
     pub const MAX_LENGTH: usize = MAX_USER_NAME_BYTES;
 
     /// Canonicalize `input`: trimmed of surrounding ASCII whitespace, then
-    /// ASCII-lowercased. Anything that is not `[a-zA-Z0-9._-]`, or that is
-    /// empty or longer than [`UserName::MAX_LENGTH`] afterwards, is refused;
-    /// the trimmed-and-lowercased candidate is returned as `Err` so the
+    /// ASCII-lowercased. The result must begin with a lowercase letter or
+    /// digit, contain only `[a-z0-9._-]`, and fit [`UserName::MAX_LENGTH`].
+    /// The trimmed-and-lowercased candidate is returned as `Err` so the
     /// caller can report what it was given.
     ///
     /// # Errors
@@ -218,7 +199,6 @@ mod tests {
     fn normalization_trims_and_lowercases() {
         assert_eq!(normalize("  Ann-Marie_2.x  "), "ann-marie_2.x");
         assert_eq!(normalize("9"), "9");
-        assert_eq!(normalize(".hidden"), ".hidden");
     }
 
     #[test]
@@ -226,6 +206,10 @@ mod tests {
         for bad in [
             "",
             "   ",
+            "--admin",
+            ".",
+            "..",
+            "_alice",
             "a b",
             "ана",
             "user@host",

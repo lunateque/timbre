@@ -179,7 +179,7 @@ pub(crate) fn lyrics(
     sql: &Connection,
     track_id: i64,
     properties: Properties,
-    window: crate::store::Window,
+    window: timbre_kernel::page::Window,
 ) -> Fallible<timbre_kernel::Page<Lyrics>> {
     let rows = all(
         sql,

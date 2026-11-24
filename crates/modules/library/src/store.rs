@@ -1,9 +1,8 @@
 use crate::failures::LibraryFailure;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use timbre_edge_sqlite::failures::query_error;
 use timbre_edge_sqlite::rusqlite::{Connection, OptionalExtension as _, Params, Row};
-use timbre_kernel::{Cursor, Fallible, Page, PageRequest};
+use timbre_kernel::Fallible;
 
 pub(crate) fn one<T>(
     sql: &Connection,
@@ -51,50 +50,6 @@ pub(crate) fn id(value: &str) -> Fallible<i64> {
     value.parse().map_err(|_| LibraryFailure::NotFound.boxed())
 }
 
-/// The paging window of one request. A `limit` above the kernel's cap is
-/// refused rather than shortened: a caller that asked for more would read a
-/// short page as the end of the list.
-pub(crate) fn window(page: PageRequest<'_>) -> Fallible<Window> {
-    if page.limit > timbre_kernel::MAX_PAGE_LIMIT {
-        return Err(LibraryFailure::Argument.boxed());
-    }
-    let offset = page
-        .cursor
-        .map_or(Ok(0), |cursor| cursor.as_str().parse::<usize>())
-        .map_err(|_| LibraryFailure::Argument.boxed())?;
-    Ok(Window {
-        count: page.limit,
-        offset,
-    })
-}
-
-#[derive(Clone, Copy)]
-pub(crate) struct Window {
-    pub(crate) count: usize,
-    pub(crate) offset: usize,
-}
-
-impl Window {
-    pub(crate) fn limit(self) -> i64 {
-        i64::try_from(self.count.saturating_add(1)).unwrap_or(i64::MAX)
-    }
-
-    pub(crate) fn skip(self) -> i64 {
-        i64::try_from(self.offset).unwrap_or(i64::MAX)
-    }
-
-    pub(crate) fn page<T>(self, mut items: Vec<T>) -> Page<T> {
-        let next = (self.count != 0 && items.len() > self.count)
-            .then(|| Cursor::new(self.offset.saturating_add(self.count).to_string()));
-        items.truncate(self.count);
-        Page { items, next }
-    }
-}
-
-pub(crate) fn unix_millis(time: SystemTime) -> i64 {
-    integer(ms(time.duration_since(UNIX_EPOCH).unwrap_or_default()))
-}
-
 pub(crate) fn integer(value: u64) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
 }
@@ -103,14 +58,6 @@ pub(crate) fn unsigned(row: &Row<'_>, index: usize) -> timbre_edge_sqlite::rusql
     let value: i64 = row.get(index)?;
     u64::try_from(value)
         .map_err(|_| timbre_edge_sqlite::rusqlite::Error::IntegralValueOutOfRange(index, value))
-}
-
-pub(crate) fn time(ms: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_millis(ms)
-}
-
-pub(crate) fn ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 #[cfg(unix)]

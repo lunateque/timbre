@@ -5,7 +5,14 @@ use timbre_kernel::{Fallible, Registry};
 // With every module feature off the body never fails, yet the signature is the seam
 // registration lines are generated into.
 #[cfg_attr(
-    not(any(feature = "folders", feature = "hello", feature = "library")),
+    not(any(
+        feature = "audit",
+        feature = "auth",
+        feature = "auth_guard",
+        feature = "folders",
+        feature = "hello",
+        feature = "library"
+    )),
     expect(
         clippy::unnecessary_wraps,
         reason = "stable signature for generated registration"
@@ -13,6 +20,12 @@ use timbre_kernel::{Fallible, Registry};
 )]
 pub(crate) fn registry() -> Fallible<Registry> {
     let registry = Registry::new();
+    #[cfg(feature = "audit")]
+    let registry = registry.module("audit", timbre_audit::register)?;
+    #[cfg(feature = "auth")]
+    let registry = registry.module("auth", timbre_auth::register)?;
+    #[cfg(feature = "auth_guard")]
+    let registry = registry.module("auth_guard", timbre_auth_guard::register)?;
     #[cfg(feature = "folders")]
     let registry = registry.module("folders", timbre_folders::register)?;
     #[cfg(feature = "hello")]

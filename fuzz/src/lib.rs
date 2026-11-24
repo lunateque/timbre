@@ -14,6 +14,7 @@
 //! oracle, so `assert!`/`expect` live here exactly where the shipped crates
 //! would forbid them.
 
+pub mod api_key;
 pub mod config;
 pub mod http;
 pub mod identity;
@@ -23,6 +24,7 @@ pub mod lyrics;
 pub mod proxy;
 pub mod tags;
 
+pub use api_key::api_key;
 pub use config::config;
 pub use http::{form_roundtrip, http_head};
 pub use identity::identity;

@@ -1,9 +1,9 @@
 use crate::Database;
 use crate::failures::SqliteFailure;
 use std::path::{Path, PathBuf};
-use std::sync::{Condvar, Mutex, OnceLock, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
-use timbre_kernel::{Ctx, Fallible};
+use timbre_kernel::{Ctx, Failure, Fallible};
 
 /// How long a caller waits for another caller's open before `sqlite.busy`.
 const OPEN_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,6 +23,16 @@ pub struct SharedDatabase {
 }
 
 impl SharedDatabase {
+    /// Access the shared database resource without opening it.
+    ///
+    /// # Errors
+    /// Returns the caller's not-configured failure if the host installed
+    /// no database resource.
+    pub fn require(ctx: &Ctx, missing: impl Failure) -> Fallible<Arc<Self>> {
+        ctx.resource::<Self>()
+            .ok_or_else(|| Box::new(missing) as Box<dyn Failure>)
+    }
+
     /// Set the database path and the host's filesystem preparation function.
     pub const fn new(path: PathBuf, prepare: fn(&Ctx, &Path) -> Fallible) -> Self {
         Self {

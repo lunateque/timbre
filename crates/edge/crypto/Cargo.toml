@@ -1,0 +1,19 @@
+[package]
+name = "timbre-edge-crypto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+fuzzing = []
+
+[dependencies]
+getrandom.workspace = true
+sha2.workspace = true
+subtle.workspace = true
+timbre-kernel.workspace = true
+
+[lints]
+workspace = true

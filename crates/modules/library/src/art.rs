@@ -1,5 +1,5 @@
 use crate::Library;
-use crate::config::{Settings, shared_db};
+use crate::config::shared_db;
 use crate::failures::{LibraryFailure, io};
 use crate::log_events::ART_SOURCE_STALE;
 use crate::media::{IMAGE_LIMITS, image_failure, read_bounded};
@@ -41,7 +41,9 @@ impl Artwork for Library {
         if size == 0 || size > IMAGE_LIMITS.max_dimension {
             return Err(LibraryFailure::ImageTooLarge.boxed());
         }
-        let cap = Settings::get(ctx)?.art_cache_mb.saturating_mul(1024 * 1024);
+        let cap = crate::settings(self)?
+            .art_cache_mb
+            .saturating_mul(1024 * 1024);
         let name = format!("{hash}-{size}.jpg");
         let dir = match cap {
             0 => None,

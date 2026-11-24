@@ -42,14 +42,15 @@ pub fn proxy(data: &[u8]) {
     let alone = timbre_edge_http::fuzzing::client_address_from(peer, &headers, &[])
         .expect("an empty trusted list cannot fail to parse");
     assert_eq!(
-        alone, peer,
+        alone,
+        peer.to_canonical(),
         "an untrusted peer keeps its own address whatever the header says"
     );
     let Ok(resolved) = timbre_edge_http::fuzzing::client_address_from(peer, &headers, &trusted)
     else {
         return;
     };
-    if resolved != peer {
+    if resolved != peer.to_canonical() {
         // The answer can only be one of the hops the headers list: split
         // them the way the resolver does and demand membership. A hop
         // spelled differently from every header fragment - or invented - is
@@ -63,6 +64,7 @@ pub fn proxy(data: &[u8]) {
                     .collect::<Vec<String>>()
             })
             .filter_map(|hop| hop.parse::<IpAddr>().ok())
+            .map(|hop| hop.to_canonical())
             .collect();
         assert!(
             listed.contains(&resolved),
@@ -82,7 +84,8 @@ pub fn proxy(data: &[u8]) {
                     .and_then(|(_, prefix)| prefix.parse::<u8>().ok())
                     .unwrap_or(u8::try_from(whole).unwrap_or(u8::MAX));
                 assert!(
-                    !(bits == u8::try_from(whole).unwrap_or(u8::MAX) && network == resolved),
+                    !(bits == u8::try_from(whole).unwrap_or(u8::MAX)
+                        && network.to_canonical() == resolved),
                     "a fully trusted address cannot be the client: {resolved} is listed as {entry}"
                 );
             }

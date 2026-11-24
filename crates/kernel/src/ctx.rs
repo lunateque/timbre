@@ -1,17 +1,18 @@
 //! The per-call context: kernel handles plus an optional request id.
 
+mod auth;
+
 use crate::bus::Signal;
-use crate::credential::{AuthOutcome, Credential, RejectReason, Verdict};
 use crate::failure::{Failure, Fallible};
 use crate::failures::KernelFailure;
 use crate::future::BoxFuture;
 use crate::identity::{Permission, Principal, UserName};
 use crate::log::{Level, LogEvent, LogValue};
-use crate::log_events::{ACCESS_DENIED, AUTH_FAILED, BLOCKING_PANICKED};
+use crate::log_events::{ACCESS_DENIED, BLOCKING_PANICKED};
 use crate::port::Ports;
 use crate::registry::Kernel;
 use crate::runtime::Slot;
-use crate::signals::{AccessDenied, AuthFailed};
+use crate::signals::AccessDenied;
 use std::net::IpAddr;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
@@ -41,6 +42,8 @@ pub struct Ctx {
     kernel: Arc<Kernel>,
     request: Option<RequestId>,
     principal: Option<Arc<Principal>>,
+    client: Option<IpAddr>,
+    cli: bool,
 }
 
 impl Ctx {
@@ -50,6 +53,8 @@ impl Ctx {
             kernel: Arc::clone(kernel),
             request: None,
             principal: None,
+            client: None,
+            cli: false,
         }
     }
 
@@ -57,9 +62,8 @@ impl Ctx {
     #[must_use]
     pub fn with_request(&self, request: RequestId) -> Ctx {
         Ctx {
-            kernel: Arc::clone(&self.kernel),
             request: Some(request),
-            principal: self.principal.clone(),
+            ..self.clone()
         }
     }
 
@@ -74,15 +78,43 @@ impl Ctx {
     /// ```
     pub(crate) fn with_principal(&self, principal: Principal) -> Ctx {
         Ctx {
-            kernel: Arc::clone(&self.kernel),
-            request: self.request,
             principal: Some(Arc::new(principal)),
+            ..self.clone()
+        }
+    }
+
+    /// A copy of this context attributed to `client`; only
+    /// [`Ctx::authenticate`] builds one, so a provider learns the address of
+    /// the attempt it is checking without the credential having to carry it.
+    fn with_client(&self, client: IpAddr) -> Ctx {
+        Ctx {
+            client: Some(client),
+            ..self.clone()
         }
     }
 
     /// The request this context belongs to, if any.
     pub fn request(&self) -> Option<RequestId> {
         self.request
+    }
+
+    /// Mark work dispatched by the standalone CLI, not by the server.
+    #[must_use]
+    pub fn for_cli(mut self) -> Self {
+        self.cli = true;
+        self
+    }
+
+    /// Whether the work belongs to a standalone command.
+    pub fn is_cli(&self) -> bool {
+        self.cli
+    }
+
+    /// The address the credential check running on this context is
+    /// attributed to; `None` outside a check. A credential provider uses it
+    /// to record where a secret was last presented from.
+    pub fn client(&self) -> Option<IpAddr> {
+        self.client
     }
 
     /// The principal the work acts as, set by the authentication layer.
@@ -123,6 +155,13 @@ impl Ctx {
         self.kernel
             .logger()
             .write(self.request, level, event, fields);
+    }
+
+    /// Warn about a security event even when the log filter would hide it.
+    pub fn log_security(&self, event: &LogEvent, fields: &[(&'static str, &dyn LogValue)]) {
+        self.kernel
+            .logger()
+            .write_always(self.request, Level::Warn, event, fields);
     }
 
     /// Run `task` on the runtime without waiting for it.
@@ -176,73 +215,6 @@ impl Ctx {
         })
     }
 
-    /// Check `credential` against the module that owns its kind, or report
-    /// `Unsupported` when the kind has none. `client` is the address the
-    /// attempt is attributed to, required so a CLI path cannot silently
-    /// blame an unspecified host. A registered `Throttle` is consulted first
-    /// and can refuse without the provider being asked. A name the credential
-    /// carries is canonicalized before either sees it; one that cannot
-    /// canonicalize is rejected as `Invalid` without asking anyone. Every
-    /// rejection publishes [`AuthFailed`] and logs one `kernel.auth_failed`
-    /// line naming client, canonical user (or the clipped candidate when the
-    /// given name was not a user name at all) and reason; the secret itself
-    /// never reaches the log.
-    pub fn authenticate(&self, credential: Credential, client: IpAddr) -> BoxFuture<AuthOutcome> {
-        let ctx = self.clone();
-        let (credential, named) = match canonicalize(credential) {
-            Ok(passed) => passed,
-            Err((candidate, reason)) => {
-                return Box::pin(async move {
-                    ctx.report_rejection(client, None, reason, Some(candidate.as_str()));
-                    AuthOutcome::Rejected(reason)
-                });
-            }
-        };
-        Box::pin(async move {
-            let outcome = decide(ctx.clone(), credential, client, named.as_ref()).await;
-            if let AuthOutcome::Rejected(reason) = outcome {
-                ctx.report_rejection(client, named.as_ref(), reason, None);
-            }
-            outcome
-        })
-    }
-
-    /// The one audit line every rejection gets. Written at `warn`
-    /// unconditionally, like `kernel.log_dropped`: fail2ban and the audit
-    /// trail must not be blinded by a log filter that hides `warn` from
-    /// `kernel`, or a deployment that runs quieter than `warn` would hide
-    /// brute-force attempts entirely. `user` is the canonical name when the
-    /// credential named a valid one, `candidate` (already clipped to
-    /// [`UserName::MAX_LENGTH`]) when the given text was not a user name.
-    fn report_rejection(
-        &self,
-        client: IpAddr,
-        user: Option<&UserName>,
-        reason: RejectReason,
-        candidate: Option<&str>,
-    ) {
-        let shown = match (user, candidate) {
-            (Some(name), _) => Some(name.as_str()),
-            (None, Some(candidate)) => Some(candidate),
-            (None, None) => None,
-        };
-        self.kernel.logger().write_always(
-            self.request,
-            Level::Warn,
-            &AUTH_FAILED,
-            &[
-                ("client", &client.to_string() as &dyn LogValue),
-                ("user", &shown.unwrap_or_default() as &dyn LogValue),
-                ("reason", &reason.as_str() as &dyn LogValue),
-            ],
-        );
-        self.publish(&AuthFailed {
-            client,
-            user: user.cloned(),
-            reason,
-        });
-    }
-
     /// The audit line of a forbidden request: a recognized identity that did
     /// not hold the route's permission. Written unconditionally like the auth
     /// failure line, and publishes [`AccessDenied`] so limiting and auditing
@@ -263,60 +235,5 @@ impl Ctx {
             user: user.clone(),
             permission,
         });
-    }
-}
-
-/// Canonicalize the credential's user name, the one spelling throttle,
-/// provider and log share. Anything outside `[a-z0-9._-]` after trimming and
-/// lowercasing is refused as `Invalid` before any module sees the attempt,
-/// with the trimmed-and-lowercased candidate returned (clipped to
-/// [`UserName::MAX_LENGTH`] bytes at a char boundary) for the audit line.
-/// On success the credential carries the canonical text and the second field
-/// is that name, so the throttle and the log never re-parse it.
-fn canonicalize(
-    mut credential: Credential,
-) -> Result<(Credential, Option<UserName>), (String, RejectReason)> {
-    let raw = credential.user().map(str::to_owned);
-    if let Some(raw) = raw {
-        match crate::identity::UserName::normalize(&raw) {
-            Ok(name) => {
-                credential.set_user(name.as_str());
-                Ok((credential, Some(name)))
-            }
-            Err(candidate) => Err((clipped(&candidate), RejectReason::Invalid)),
-        }
-    } else {
-        Ok((credential, None))
-    }
-}
-
-/// The longest text an audit line may carry for a rejected name candidate.
-fn clipped(candidate: &str) -> String {
-    let bound = crate::identity::clip_boundary(candidate, UserName::MAX_LENGTH);
-    candidate.get(..bound).unwrap_or(candidate).to_owned()
-}
-
-/// Throttle first, then the kind's provider; no logging or signals here.
-async fn decide(
-    ctx: Ctx,
-    credential: Credential,
-    client: IpAddr,
-    user: Option<&UserName>,
-) -> AuthOutcome {
-    if ctx
-        .kernel
-        .throttle()
-        .is_some_and(|throttle| !throttle.allow(client, user))
-    {
-        return AuthOutcome::Rejected(RejectReason::Throttled);
-    }
-    let Some(provider) = ctx.kernel.credential_provider(credential.kind()).cloned() else {
-        return AuthOutcome::Unsupported;
-    };
-    // The Arc is cloned out first: `check` takes `ctx` by value, and a borrow
-    // of the kernel table would keep `ctx` alive while it moves.
-    match provider.check(ctx, credential).await {
-        Verdict::Recognized(identity) => AuthOutcome::Recognized(identity),
-        Verdict::Rejected(reason) => AuthOutcome::Rejected(reason),
     }
 }

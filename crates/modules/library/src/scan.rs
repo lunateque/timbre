@@ -17,14 +17,14 @@ use crate::LibraryState;
 use crate::config::{Settings, shared_db};
 use crate::failures::LibraryFailure;
 use crate::log_events::{SCAN_FAILED, SCAN_STARTED};
-use crate::store::{exec, one, path_to_bytes, time, unsigned};
+use crate::store::{exec, one, path_to_bytes, unsigned};
 use progress::Progress;
 use std::collections::HashSet;
 use std::future::poll_fn;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::Poll;
+use std::task::{Context as TaskContext, Poll, Waker};
 use std::time::{Duration, Instant};
 use timbre_edge_sqlite::rusqlite::params;
 use timbre_kernel::catalog::ScanStatus;
@@ -79,12 +79,12 @@ pub(crate) fn status(library: &dyn LibraryState, ctx: &Ctx) -> Fallible<ScanStat
         return Ok(current);
     }
     shared_db(ctx)?.get(ctx)?.read(|sql| one(sql, "SELECT (SELECT count(*) FROM library_tracks), scanned_folders,tag_reads,unreadable,finished FROM library_state WHERE id=1", [], |row| Ok(ScanStatus {
-        scanning: false, tracks: unsigned(row, 0)?, folders: unsigned(row, 1)?, tag_reads: unsigned(row, 2)?, unreadable: unsigned(row, 3)?, finished: row.get::<_, Option<i64>>(4)?.and_then(|value| u64::try_from(value).ok()).map(time),
+        scanning: false, tracks: unsigned(row, 0)?, folders: unsigned(row, 1)?, tag_reads: unsigned(row, 2)?, unreadable: unsigned(row, 3)?, finished: row.get::<_, Option<i64>>(4)?.filter(|value| *value >= 0).map(timbre_kernel::clock::from_unix_millis),
     })))
 }
 
 pub(crate) fn start(ctx: &Ctx, library: &dyn LibraryState, full: bool) -> Fallible<ScanStatus> {
-    let settings = Settings::get(ctx)?;
+    let settings = Arc::clone(crate::settings(library)?);
     settings.canonical_roots(shared_db(ctx)?.path())?;
     let current = status(library, ctx)?;
     let running = Running::begin(crate::state(ctx)?)?;
@@ -115,10 +115,22 @@ pub(crate) async fn stoppable<T: Send + 'static>(
     work: impl FnOnce(Arc<AtomicBool>, Ctx) -> Fallible<T> + Send + 'static,
 ) -> Fallible<T> {
     let stop = Arc::new(AtomicBool::new(false));
+    let mut shutdown = Some(ctx.shutdown());
+    // A shutdown that already happened reaches the worker before it starts:
+    // polling the signal only after the work is spawned would let a pass
+    // race the stop that is supposed to end it.
+    if let Some(signal) = shutdown.as_mut()
+        && signal
+            .as_mut()
+            .poll(&mut TaskContext::from_waker(Waker::noop()))
+            .is_ready()
+    {
+        stop.store(true, Ordering::Release);
+        shutdown = None;
+    }
     let in_worker = Arc::clone(&stop);
     let worker_ctx = ctx.clone();
     let mut blocking = ctx.blocking(move || work(in_worker, worker_ctx));
-    let mut shutdown = Some(ctx.shutdown());
     poll_fn(move |cx| {
         if shutdown
             .as_mut()
@@ -135,13 +147,21 @@ pub(crate) async fn stoppable<T: Send + 'static>(
     .await
 }
 
+/// How a scan pass ended: a stop request leaves the index consistent but
+/// unfinished, which the caller reports differently from a full pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Complete,
+    Stopped,
+}
+
 pub(crate) fn run(
     ctx: &Ctx,
     running: &Running,
     settings: &Settings,
     full: bool,
     stop: &AtomicBool,
-) -> Fallible {
+) -> Fallible<Outcome> {
     run_inner(ctx, running, settings, full, stop, None)
 }
 
@@ -151,7 +171,7 @@ pub(crate) fn run_watched(
     settings: &Settings,
     stop: &AtomicBool,
     scope: &WatchScope,
-) -> Fallible {
+) -> Fallible<Outcome> {
     run_inner(ctx, running, settings, false, stop, Some(scope))
 }
 
@@ -162,7 +182,7 @@ fn run_inner(
     full: bool,
     stop: &AtomicBool,
     watch: Option<&WatchScope>,
-) -> Fallible {
+) -> Fallible<Outcome> {
     let shared = shared_db(ctx)?;
     let roots = settings.canonical_roots(shared.path())?;
     let db = shared.get(ctx)?;
@@ -198,7 +218,7 @@ fn run_inner(
     let forest = &observed.forest;
     progress.folders(forest.len().saturating_sub(observed.retained.len()));
     if stopped() {
-        return progress.finish(db, None);
+        return halted(progress, db);
     }
     let changed = full || roots_changed || forest_changed(forest, &indexed, &previous);
     prepare_reconcile(db, changed)?;
@@ -234,7 +254,7 @@ fn run_inner(
         )?;
         unreadable.extend(new_errors);
         if stopped() {
-            return progress.finish(db, None);
+            return halted(progress, db);
         }
         let present = locations
             .keys()
@@ -252,14 +272,22 @@ fn run_inner(
         tree.erase_missing(db)?;
         let scope = scope::regroup_scope(db, &tree, !full && !roots_changed)?;
         if !crate::albums::regroup(db, settings, scope.as_ref(), &stopped)? {
-            return progress.finish(db, None);
+            return halted(progress, db);
         }
         let tree_changed =
             !tree.changed.is_empty() || !tree.removed.is_empty() || !tree.removed_roots.is_empty();
         db.write(|sql| { exec(sql, "UPDATE library_state SET tree_version=tree_version+?1,policy=?2,dirty=0 WHERE id=1", params![tree_changed, policy])?; Ok(()) })?;
     }
     mark_unstable(db, &unstable)?;
-    progress.finish(db, Some(observed.unreadable))
+    progress.finish(db, Some(observed.unreadable))?;
+    Ok(Outcome::Complete)
+}
+
+/// A pass that shutdown interrupted: the progress row is closed like any
+/// other, but the caller must not report a complete scan.
+fn halted(progress: Progress, db: &timbre_edge_sqlite::Database) -> Fallible<Outcome> {
+    progress.finish(db, None)?;
+    Ok(Outcome::Stopped)
 }
 
 fn prepare_reconcile(db: &timbre_edge_sqlite::Database, changed: bool) -> Fallible {

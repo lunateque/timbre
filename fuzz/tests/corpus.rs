@@ -102,3 +102,8 @@ fn image_thumbnail_seeds_hold_their_invariants() {
 fn lrc_parse_seeds_hold_their_invariants() {
     replay("lrc_parse", timbre_fuzz::lrc_parse);
 }
+
+#[test]
+fn api_key_parse_seeds_hold_their_invariants() {
+    replay("api_key_parse", timbre_fuzz::api_key);
+}

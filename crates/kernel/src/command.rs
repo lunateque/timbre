@@ -5,6 +5,45 @@ use crate::failure::Fallible;
 use crate::failures::KernelFailure;
 use crate::future::BoxFuture;
 use crate::names;
+use std::fmt;
+use std::io::{self, Write};
+use std::sync::{Mutex, PoisonError};
+
+/// An optional CLI output sink installed as a resource instead of stdout.
+pub struct Output(Mutex<Box<dyn Write + Send>>);
+
+impl Output {
+    /// Direct command results to the given writer.
+    pub fn new(writer: Box<dyn Write + Send>) -> Self {
+        Self(Mutex::new(writer))
+    }
+}
+
+impl Ctx {
+    /// Write one line of command output independently of the log filter.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.output_failed` when the output cannot be written or flushed.
+    pub fn say(&self, line: fmt::Arguments<'_>) -> Fallible {
+        let result = match self.resource::<Output>() {
+            Some(sink) => write_line(
+                &mut *sink.0.lock().unwrap_or_else(PoisonError::into_inner),
+                line,
+            ),
+            None => write_line(&mut io::stdout().lock(), line),
+        };
+        result.map_err(|error| {
+            Box::new(KernelFailure::OutputFailed(error)) as Box<dyn crate::Failure>
+        })
+    }
+}
+
+fn write_line(writer: &mut dyn Write, line: fmt::Arguments<'_>) -> io::Result<()> {
+    writer.write_fmt(line)?;
+    writer.write_all(b"\n")?;
+    writer.flush()
+}
 
 /// The handler shape of a CLI command: `args` are the words after the command
 /// name; the handler prints and fails as it sees fit.

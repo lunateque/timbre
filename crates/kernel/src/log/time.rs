@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// Days since 1970-01-01 to a proleptic Gregorian date, after Howard Hinnant's
 /// `civil_from_days`. All divisions are exact floor divisions because the
 /// input days are never negative: pre-epoch times clamp to the epoch above.
-const fn civil_from_days(days: i64) -> (i64, i64, i64) {
+pub(crate) const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z / 146_097;
     let doe = z - era * 146_097;
@@ -16,6 +16,18 @@ const fn civil_from_days(days: i64) -> (i64, i64, i64) {
     let month = if mp < 10 { mp + 3 } else { mp - 9 };
     let year = yoe + era * 400 + if month <= 2 { 1 } else { 0 };
     (year, month, day)
+}
+
+/// The inverse of [`civil_from_days`], after Hinnant's `days_from_civil`:
+/// the day number of a proleptic Gregorian date.
+pub(crate) const fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let mp = if month > 2 { month - 3 } else { month + 9 };
+    let doy = (153 * mp + 2) / 5 + day - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146_097 + doe - 719_468
 }
 
 /// Split a time into `(days, second_of_day, millis_of_second)` after clamping

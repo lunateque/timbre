@@ -40,7 +40,8 @@ pub enum Versioned<T> {
 /// Browse visible directories; implementations may block on storage, so
 /// asynchronous callers should use [`Ctx::blocking`]. Every method serves at
 /// most [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) items; a larger `limit` is
-/// refused with `folders.page_too_large`.
+/// refused with `kernel.page_too_large`. Concurrent inserts or deletes can
+/// shift later offset pages.
 pub trait Folders: Port {
     /// Music roots in configuration order, then id.
     ///
@@ -66,7 +67,7 @@ pub trait Folders: Port {
     ///
     /// # Errors
     /// Returns a failure if the tree is unavailable, the directory is absent or hidden, or results cannot be read.
-    fn directory(
+    fn folder(
         &self,
         ctx: &Ctx,
         id: &str,

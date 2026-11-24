@@ -9,6 +9,7 @@ use crate::{Ctx, Format, Kernel, LogFilter, Logger, Registry, ThreadRuntime, blo
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex, PoisonError};
 
+mod settlement;
 mod user_names;
 
 fn user(text: &str) -> UserName {
@@ -35,7 +36,7 @@ impl CredentialProvider for Stub {
         // The test verdicts are constant, so rebuilding one is cheap.
         let verdict = match &self.verdict {
             Verdict::Recognized(_) => Verdict::Recognized(identity()),
-            Verdict::Rejected(reason) => Verdict::Rejected(*reason),
+            Verdict::Rejected(reason, detail) => Verdict::Rejected(*reason, *detail),
         };
         Box::pin(async move { verdict })
     }
@@ -70,8 +71,19 @@ impl Port for Log {}
 struct Deny;
 
 impl Throttle for Deny {
-    fn allow(&self, _client: IpAddr, _user: Option<&UserName>) -> bool {
-        false
+    fn reserve(&self, _: &Ctx, _: IpAddr, _: Option<&UserName>) -> Option<[bool; 2]> {
+        None
+    }
+
+    fn finish(
+        &self,
+        _: &Ctx,
+        _: IpAddr,
+        _: Option<&UserName>,
+        _: [bool; 2],
+        _: Option<RejectReason>,
+    ) {
+        panic!("a refused check never reserves")
     }
 }
 
@@ -97,6 +109,7 @@ struct Harness {
     sink: Shared,
     journal: Arc<Log>,
     asked: Arc<Mutex<usize>>,
+    runtime: Arc<ThreadRuntime>,
 }
 
 impl Harness {
@@ -133,15 +146,17 @@ impl Harness {
                 .expect("provider");
         }
         registry.on::<AuthFailed>(remember);
+        let runtime = Arc::new(ThreadRuntime::new());
         let kernel = registry.finish(
             Logger::new(filter, Format::Json, Box::new(sink.clone()), fixed),
-            Arc::new(ThreadRuntime::new()),
+            runtime.clone(),
         );
         Harness {
             kernel,
             sink,
             journal,
             asked,
+            runtime,
         }
     }
 
@@ -193,13 +208,20 @@ fn a_kind_without_an_owner_is_unsupported_and_no_provider_runs() {
         harness.journal.entries().is_empty(),
         "unsupported is not a rejection"
     );
+    assert!(harness.kernel.flush_log());
+    let line = harness.sink.text();
+    assert!(
+        line.contains(r#""event":"kernel.auth_unsupported""#),
+        "{line}"
+    );
+    assert!(line.contains(r#""kind":"bearer""#), "{line}");
 }
 
 #[test]
 fn a_second_owner_of_a_kind_is_refused_naming_both_modules() {
     let stub = || {
         Arc::new(Stub {
-            verdict: Verdict::Rejected(RejectReason::Invalid),
+            verdict: Verdict::Rejected(RejectReason::Invalid, None),
             asked: Arc::new(Mutex::new(0usize)),
         }) as Arc<dyn CredentialProvider>
     };
@@ -225,7 +247,7 @@ fn a_rejection_publishes_its_detail_and_never_the_secret() {
     let harness = Harness::build(
         Some((
             CredentialKind::Password,
-            Verdict::Rejected(RejectReason::Invalid),
+            Verdict::Rejected(RejectReason::Invalid, None),
         )),
         false,
     );
@@ -258,22 +280,32 @@ fn a_rejection_publishes_its_detail_and_never_the_secret() {
 
 #[test]
 fn a_throttle_refuses_before_the_provider_is_asked() {
-    let harness = Harness::build(
+    let harness = Harness::build_with_filter(
         Some((CredentialKind::ApiKey, Verdict::Recognized(identity()))),
         true,
+        LogFilter::parse("error").unwrap(),
     );
-    let outcome = block_on(
-        harness
-            .ctx()
-            .authenticate(Credential::ApiKey(Secret::new("k".to_owned())), client()),
-    );
-    assert_eq!(outcome, AuthOutcome::Rejected(RejectReason::Throttled));
+    let ctx = harness.ctx();
+    harness.kernel.start_jobs(&ctx);
+    let other = IpAddr::V4(Ipv4Addr::new(192, 0, 2, 10));
+    for ip in [client(), other, client()] {
+        let outcome =
+            block_on(ctx.authenticate(Credential::ApiKey(Secret::new("k".to_owned())), ip));
+        assert_eq!(outcome, AuthOutcome::Rejected(RejectReason::Throttled));
+    }
     assert_eq!(harness.asked_count(), 0, "the provider was never asked");
+    assert_eq!(harness.journal.entries(), Vec::<String>::new());
+    assert_eq!(harness.sink.text(), "");
+    harness.runtime.trigger_shutdown();
+    assert!(harness.kernel.wait_jobs(std::time::Duration::from_secs(2)));
+    let log = harness.sink.text();
     assert_eq!(
-        harness.journal.entries(),
-        ["127.0.0.1||throttled"],
-        "an unnamed credential still publishes the client"
+        log.matches(r#""event":"kernel.auth_throttled""#).count(),
+        2,
+        "{log}"
     );
+    assert!(log.contains(r#""client":"127.0.0.1","count":2"#), "{log}");
+    assert!(log.contains(r#""client":"192.0.2.10","count":1"#), "{log}");
 }
 
 #[test]
@@ -282,7 +314,7 @@ fn an_auth_failure_is_logged_even_when_the_filter_hides_warn() {
     let harness = Harness::build_with_filter(
         Some((
             CredentialKind::Password,
-            Verdict::Rejected(RejectReason::Invalid),
+            Verdict::Rejected(RejectReason::Invalid, None),
         )),
         false,
         quiet,

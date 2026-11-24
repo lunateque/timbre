@@ -34,6 +34,38 @@ fn a_third_reader_on_a_pool_of_two_times_out_with_busy() {
 }
 
 #[test]
+fn related_reads_share_the_snapshot_despite_an_intervening_commit() {
+    let path = scratch("read-snapshot");
+    let database = Database::open(&path).expect("a fresh database opens");
+    database
+        .write(|connection| {
+            batch(
+                connection,
+                "CREATE TABLE account (permission TEXT); INSERT INTO account VALUES ('before')",
+            )
+        })
+        .unwrap();
+    let permission = |connection: &Connection| {
+        connection
+            .query_row("SELECT permission FROM account", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .map_err(crate::failures::query_error)
+    };
+    database
+        .read_transaction(|connection| {
+            assert_eq!(permission(connection)?, "before");
+            database.write(|writer| batch(writer, "UPDATE account SET permission='after'"))?;
+            assert_eq!(permission(connection)?, "before");
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(database.read(permission).unwrap(), "after");
+    drop(database);
+    let _ = std::fs::remove_dir_all(path.parent().expect("the scratch dir"));
+}
+
+#[test]
 fn a_long_statement_is_interrupted_by_the_watchdog() {
     let path = scratch("watchdog");
     // A one-second cap: the recursive CTE below runs far longer on every

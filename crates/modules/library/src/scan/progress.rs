@@ -1,13 +1,14 @@
 use crate::LibraryState;
 use crate::log_events::{SCAN_FINISHED, SCAN_PROGRESS};
-use crate::store::{all, exec, integer, one, unix_millis, unsigned};
+use crate::store::{all, exec, integer, one, unsigned};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use timbre_edge_sqlite::Database;
 use timbre_edge_sqlite::rusqlite::params;
+use timbre_kernel::clock::now_unix_millis;
 use timbre_kernel::{Ctx, Fallible, log};
 
 const INTERVAL: Duration = Duration::from_secs(5);
@@ -104,7 +105,7 @@ impl<'a> Progress<'a> {
             )
         })?;
         let unreadable = files.saturating_add(unreadable_folders.unwrap_or_default());
-        let now = unix_millis(SystemTime::now());
+        let now = now_unix_millis();
         if unreadable_folders.is_some() {
             db.write(|sql| { exec(sql, "UPDATE library_state SET unreadable=?1,scanned_folders=?2,tag_reads=?3,finished=?4 WHERE id=1", params![integer(unreadable), integer(folders), integer(tag_reads), now])?; Ok(()) })?;
         }

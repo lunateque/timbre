@@ -4,10 +4,27 @@
 use super::*;
 
 #[test]
-fn a_malformed_user_name_is_rejected_before_the_throttle_and_the_provider() {
+fn a_malformed_name_can_be_refused_by_the_address_throttle() {
     let harness = Harness::build(
         Some((CredentialKind::Password, Verdict::Recognized(identity()))),
-        true, // even a denying throttle must not be reached
+        true,
+    );
+    let outcome = block_on(harness.ctx().authenticate(
+        Credential::Password {
+            user: "a b".to_owned(),
+            secret: Secret::new("s".to_owned()),
+        },
+        client(),
+    ));
+    assert_eq!(outcome, AuthOutcome::Rejected(RejectReason::Throttled));
+    assert_eq!(harness.asked_count(), 0);
+}
+
+#[test]
+fn a_malformed_user_name_never_reaches_the_provider() {
+    let harness = Harness::build(
+        Some((CredentialKind::Password, Verdict::Recognized(identity()))),
+        false,
     );
     let outcome = block_on(harness.ctx().authenticate(
         Credential::Password {
@@ -101,6 +118,30 @@ fn a_scheme_with_an_empty_user_names_no_one() {
 }
 
 #[test]
+fn an_empty_scheme_user_requires_its_owners_opt_in() {
+    const SCHEME: SchemeName = SchemeName::new("test.sig");
+    // No throttle here: the refusal itself is what this test pins, and the
+    // address window that now sees it has its own tests in `settlement`.
+    let harness = Harness::build(
+        Some((
+            CredentialKind::Scheme(SCHEME),
+            Verdict::Recognized(identity()),
+        )),
+        false,
+    );
+    let outcome = block_on(harness.ctx().authenticate(
+        Credential::Scheme {
+            name: SCHEME,
+            user: String::new(),
+            fields: Vec::new(),
+        },
+        client(),
+    ));
+    assert_eq!(outcome, AuthOutcome::Rejected(RejectReason::Invalid));
+    assert_eq!(harness.asked_count(), 0);
+}
+
+#[test]
 fn a_credential_user_name_is_canonicalized_for_provider_and_log() {
     #[derive(Debug)]
     struct Echo;
@@ -112,7 +153,7 @@ fn a_credential_user_name_is_canonicalized_for_provider_and_log() {
                 if named {
                     Verdict::Recognized(identity())
                 } else {
-                    Verdict::Rejected(RejectReason::Invalid)
+                    Verdict::Rejected(RejectReason::Invalid, None)
                 }
             })
         }

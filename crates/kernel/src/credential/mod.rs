@@ -1,5 +1,7 @@
 //! Credentials: what a protocol extracts from a request, and who checks it.
 
+pub(crate) mod throttled;
+
 use crate::ctx::Ctx;
 use crate::failure::Fallible;
 use crate::future::BoxFuture;
@@ -129,10 +131,8 @@ impl Credential {
         }
     }
 
-    /// The user named in the credential, if it names one. A `Scheme` whose
-    /// user is empty names none: a scheme may derive the user from its own
-    /// fields, and the kernel must not canonicalize (and so cannot reject) a
-    /// placeholder the owner never intends to use.
+    /// The user named in the credential, if it names one. An empty scheme
+    /// user names none; the kernel accepts it only when the owner opted in.
     #[must_use]
     pub fn user(&self) -> Option<&str> {
         match self {
@@ -160,7 +160,8 @@ impl Credential {
 pub enum RejectReason {
     /// The secret or user did not verify.
     Invalid,
-    /// A `Throttle` refused to ask the provider at all.
+    /// A `Throttle` refused the attempt. Only the kernel may return this
+    /// reason; credential providers must not use it.
     Throttled,
     /// The account or device exists but is disabled.
     Disabled,
@@ -178,13 +179,33 @@ impl RejectReason {
     }
 }
 
+/// A static operator-facing label, never part of a protocol denial.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RejectDetail(&'static str);
+
+impl RejectDetail {
+    /// Validate a label as a single lowercase name segment.
+    pub const fn try_new(label: &'static str) -> Option<Self> {
+        if crate::names::is_valid_segment(label) {
+            Some(Self(label))
+        } else {
+            None
+        }
+    }
+
+    /// The validated label for logging and journalling.
+    pub const fn as_str(self) -> &'static str {
+        self.0
+    }
+}
+
 /// The provider's answer about one credential.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
     /// The credential belongs to this identity.
     Recognized(Identity),
-    /// The credential does not pass.
-    Rejected(RejectReason),
+    /// The credential does not pass; optional detail stays off the wire.
+    Rejected(RejectReason, Option<RejectDetail>),
 }
 
 /// The outcome of `Ctx::authenticate`, wider than a [`Verdict`].
@@ -209,9 +230,23 @@ pub trait CredentialProvider: Send + Sync {
 /// there is exactly one, the kernel itself is its only consumer) and its
 /// absence means no in-process limiting.
 pub trait Throttle: Send + Sync {
-    /// Whether an attempt from `client` (and `user`, when the credential
-    /// named one, in its canonical spelling) may proceed.
-    fn allow(&self, client: IpAddr, user: Option<&UserName>) -> bool;
+    /// Reserve capacity, or return `None` to refuse the check. The returned
+    /// flags indicate whether the address and user slots were reserved,
+    /// respectively. They are passed unchanged to [`Throttle::finish`].
+    fn reserve(&self, ctx: &Ctx, client: IpAddr, user: Option<&UserName>) -> Option<[bool; 2]>;
+
+    /// Release a reservation and, when it ended in a rejection, account for it.
+    fn finish(
+        &self,
+        ctx: &Ctx,
+        client: IpAddr,
+        user: Option<&UserName>,
+        reserved: [bool; 2],
+        reason: Option<RejectReason>,
+    );
+
+    /// Report accumulated limiter diagnostics on the kernel's minute tick and on shutdown.
+    fn report(&self, _ctx: &Ctx) {}
 }
 
 /// A kind's owner: the provider and the module id whose registration
@@ -219,6 +254,7 @@ pub trait Throttle: Send + Sync {
 struct Owner {
     provider: Arc<dyn CredentialProvider>,
     module: Option<&'static str>,
+    accepts_userless: bool,
 }
 
 /// The credential providers registered so far; owned by the kernel.
@@ -233,6 +269,7 @@ impl CredentialTable {
         kind: CredentialKind,
         provider: Arc<dyn CredentialProvider>,
         module: Option<&'static str>,
+        accepts_userless: bool,
     ) -> Fallible {
         if let Some(existing) = self.owners.get(&kind) {
             return Err(Box::new(
@@ -243,12 +280,25 @@ impl CredentialTable {
                 },
             ));
         }
-        self.owners.insert(kind, Owner { provider, module });
+        self.owners.insert(
+            kind,
+            Owner {
+                provider,
+                module,
+                accepts_userless,
+            },
+        );
         Ok(())
     }
 
     pub(crate) fn get(&self, kind: CredentialKind) -> Option<&Arc<dyn CredentialProvider>> {
         self.owners.get(&kind).map(|owner| &owner.provider)
+    }
+
+    pub(crate) fn accepts_userless(&self, kind: CredentialKind) -> bool {
+        self.owners
+            .get(&kind)
+            .is_some_and(|owner| owner.accepts_userless)
     }
 }
 

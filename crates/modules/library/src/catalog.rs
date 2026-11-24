@@ -1,7 +1,7 @@
 use crate::config::shared_db;
 use crate::failures::LibraryFailure;
 use crate::search::hydrate_page;
-use crate::store::{Window, all, contained, id, one, row_path, unsigned, window};
+use crate::store::{all, contained, id, one, row_path, unsigned};
 use crate::{Library, media, scan, search, views};
 use timbre_edge_sqlite::rusqlite::{Connection, Params, params};
 use timbre_edge_tags::{Codec, Container};
@@ -10,11 +10,11 @@ use timbre_kernel::catalog::{
     Album, AlbumDetail, AlbumOrder, Artist, ArtistDetail, Catalog, Genre, Lyrics, MediaSource,
     ScanStatus, SearchResults, SearchWindows, Track,
 };
-use timbre_kernel::{Ctx, Fallible, Page, PageRequest};
+use timbre_kernel::{Ctx, Fallible, Page, PageRequest, page::Window};
 
 impl Catalog for Library {
     fn artists(&self, ctx: &Ctx, page: PageRequest<'_>) -> Fallible<Page<Artist>> {
-        let win = window(page)?;
+        let win = Window::new(page)?;
         shared_db(ctx)?.get(ctx)?.read(|sql| {
             ids(
                 sql,
@@ -27,7 +27,7 @@ impl Catalog for Library {
     }
 
     fn artist(&self, ctx: &Ctx, artist: &str, albums: PageRequest<'_>) -> Fallible<ArtistDetail> {
-        let win = window(albums)?;
+        let win = Window::new(albums)?;
         let artist = id(artist)?;
         shared_db(ctx)?.get(ctx)?.read(|sql| {
             Ok(ArtistDetail {
@@ -44,7 +44,7 @@ impl Catalog for Library {
     }
 
     fn album(&self, ctx: &Ctx, album: &str, tracks: PageRequest<'_>) -> Fallible<AlbumDetail> {
-        let win = window(tracks)?;
+        let win = Window::new(tracks)?;
         let album = id(album)?;
         shared_db(ctx)?.get(ctx)?.read(|sql| Ok(AlbumDetail {
             album: views::album(sql, album)?,
@@ -60,17 +60,17 @@ impl Catalog for Library {
     }
 
     fn tracks(&self, ctx: &Ctx, tracks: &[&str], page: PageRequest<'_>) -> Fallible<Page<Track>> {
-        let win = window(page)?;
+        let win = Window::new(page)?;
         shared_db(ctx)?.get(ctx)?.read(|sql| {
             let mut matching = Vec::new();
-            let mut skip = win.offset;
+            let mut skip = win.offset();
             for input in tracks {
                 let Ok(track) = id(input) else { continue };
                 let exists: bool = one(sql, "SELECT EXISTS(SELECT 1 FROM library_tracks WHERE id=?1 AND album_id IS NOT NULL)", [track], |row| row.get(0))?;
                 if !exists { continue; }
                 if skip != 0 { skip -= 1; continue; }
                 matching.push(track);
-                if matching.len() > win.count { break; }
+                if matching.len() > win.count() { break; }
             }
             hydrate_page(sql, matching, win, views::track)
         })
@@ -82,14 +82,14 @@ impl Catalog for Library {
         order: AlbumOrder<'_>,
         page: PageRequest<'_>,
     ) -> Fallible<Page<Album>> {
-        let win = window(page)?;
+        let win = Window::new(page)?;
         shared_db(ctx)?
             .get(ctx)?
             .read(|sql| browse(sql, &order, win))
     }
 
     fn genres(&self, ctx: &Ctx, page: PageRequest<'_>) -> Fallible<Page<Genre>> {
-        let win = window(page)?;
+        let win = Window::new(page)?;
         shared_db(ctx)?.get(ctx)?.read(|sql| {
             let genres = all(sql, "SELECT g.name,count(DISTINCT t.album_id),count(*) FROM library_track_genres g JOIN library_tracks t ON t.id=g.track_id GROUP BY g.folded_name,g.name ORDER BY g.folded_name,g.name LIMIT ?1 OFFSET ?2", params![win.limit(), win.skip()], |row| Ok(Genre { name: row.get(0)?, album_count: unsigned(row, 1)?, track_count: unsigned(row, 2)? }))?;
             Ok(win.page(genres))
@@ -97,19 +97,19 @@ impl Catalog for Library {
     }
 
     fn search(&self, ctx: &Ctx, query: &str, windows: SearchWindows) -> Fallible<SearchResults> {
-        for window in [windows.artists, windows.albums, windows.tracks] {
-            if window.count > timbre_kernel::MAX_PAGE_LIMIT {
-                return Err(LibraryFailure::Argument.boxed());
-            }
-        }
+        let pages = [
+            Window::from_offset(windows.artists.count, windows.artists.offset)?,
+            Window::from_offset(windows.albums.count, windows.albums.offset)?,
+            Window::from_offset(windows.tracks.count, windows.tracks.offset)?,
+        ];
         shared_db(ctx)?
             .get(ctx)?
-            .read(|sql| search::find(sql, query, windows))
+            .read(|sql| search::find(sql, query, pages))
     }
 
     fn lyrics(&self, ctx: &Ctx, track: &str, page: PageRequest<'_>) -> Fallible<Page<Lyrics>> {
         let track = id(track)?;
-        let win = window(page)?;
+        let win = Window::new(page)?;
         shared_db(ctx)?
             .get(ctx)?
             .read(|sql| media::lyrics(sql, track, views::source(sql, track)?.properties, win))

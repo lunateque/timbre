@@ -91,7 +91,7 @@ fn a_rejected_credential_denies_without_saying_why() {
         &[(
             "first",
             CredentialKind::Password,
-            Verdict::Rejected(RejectReason::Invalid),
+            Verdict::Rejected(RejectReason::Invalid, None),
         )],
         None,
         LogFilter::default(),
@@ -103,7 +103,7 @@ fn a_rejected_credential_denies_without_saying_why() {
         &[(
             "first",
             CredentialKind::Password,
-            Verdict::Rejected(RejectReason::Disabled),
+            Verdict::Rejected(RejectReason::Disabled, None),
         )],
         None,
         LogFilter::default(),
@@ -213,7 +213,7 @@ fn an_auth_failure_line_survives_a_filter_that_hides_everything() {
         &[(
             "first",
             CredentialKind::ApiKey,
-            Verdict::Rejected(RejectReason::Invalid),
+            Verdict::Rejected(RejectReason::Invalid, None),
         )],
         None,
         quiet,

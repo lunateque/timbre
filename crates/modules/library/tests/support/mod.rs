@@ -29,6 +29,7 @@ pub(crate) struct Fixture {
     roots: RefCell<Vec<String>>,
     extra: RefCell<String>,
     sink: Shared,
+    output: Shared,
 }
 
 impl Fixture {
@@ -46,6 +47,7 @@ impl Fixture {
             roots: RefCell::new(roots.iter().map(|root| (*root).to_owned()).collect()),
             extra: RefCell::new(String::new()),
             sink: Shared::default(),
+            output: Shared::default(),
         }
     }
     pub(crate) fn ctx(&self) -> Ctx {
@@ -72,6 +74,10 @@ impl Fixture {
                 std::fs::create_dir_all(path.parent().unwrap()).unwrap();
                 Ok(())
             })))
+            .unwrap()
+            .with(Arc::new(timbre_kernel::command::Output::new(Box::new(
+                self.output.clone(),
+            ))))
             .unwrap();
         let runtime = Arc::new(ThreadRuntime::new());
         let kernel = Registry::new()
@@ -87,6 +93,7 @@ impl Fixture {
                 runtime.clone(),
                 resources,
             );
+        kernel.check_config().unwrap();
         (Ctx::root(&kernel), runtime)
     }
     pub(crate) fn path(&self, path: &str) -> PathBuf {
@@ -145,11 +152,11 @@ impl Fixture {
             "library explain",
             vec![self.path(path).to_string_lossy().into_owned()],
         );
-        self.log()
-            .lines()
-            .rfind(|line| line.contains("\"event\":\"library.explained\""))
-            .unwrap()
-            .to_owned()
+        self.output.text().lines().last().unwrap().to_owned()
+    }
+    /// Everything the commands have written to stdout so far.
+    pub(crate) fn said(&self) -> String {
+        self.output.text()
     }
     fn command(&self, name: &str, rest: Vec<String>) {
         let ctx = self.ctx();

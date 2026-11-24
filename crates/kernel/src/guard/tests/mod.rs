@@ -79,7 +79,7 @@ pub(super) struct Fake {
 /// A fake that always rejects; the owner-clash tests only need its identity.
 pub(super) fn rejecting() -> Arc<dyn CredentialProvider> {
     Arc::new(Fake {
-        verdict: Verdict::Rejected(RejectReason::Invalid),
+        verdict: Verdict::Rejected(RejectReason::Invalid, None),
         asked: Arc::new(AtomicUsize::new(0)),
     })
 }
@@ -99,15 +99,26 @@ fn clone_verdict(verdict: &Verdict) -> Verdict {
             user: found.user.clone(),
             permissions: found.permissions.clone(),
         }),
-        Verdict::Rejected(reason) => Verdict::Rejected(*reason),
+        Verdict::Rejected(reason, detail) => Verdict::Rejected(*reason, *detail),
     }
 }
 
 pub(super) struct DenyAll;
 
 impl Throttle for DenyAll {
-    fn allow(&self, _client: IpAddr, _user: Option<&UserName>) -> bool {
-        false
+    fn reserve(&self, _: &Ctx, _: IpAddr, _: Option<&UserName>) -> Option<[bool; 2]> {
+        None
+    }
+
+    fn finish(
+        &self,
+        _: &Ctx,
+        _: IpAddr,
+        _: Option<&UserName>,
+        _: [bool; 2],
+        _: Option<RejectReason>,
+    ) {
+        panic!("a refused check never reserves")
     }
 }
 

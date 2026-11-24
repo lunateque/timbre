@@ -6,7 +6,7 @@
 
 use crate::db;
 use crate::failures::TimbreFailure;
-use crate::log_events::{DATABASE_FAILED, HELP, STARTED, STOPPED};
+use crate::log_events::{DATABASE_FAILED, STARTED};
 use timbre_edge_sqlite::{Database, SharedDatabase};
 use timbre_kernel::signals::Started;
 use timbre_kernel::{BoxFuture, Ctx, Failure, Fallible, Kernel, Registry, log};
@@ -56,12 +56,21 @@ pub(crate) enum Outcome {
 }
 
 /// Classify a dispatched command's failure for the exit path.
-pub(crate) fn classify(outcome: Fallible) -> Outcome {
+pub(crate) fn classify(ctx: &Ctx, outcome: Fallible) -> Outcome {
     let Err(failure) = outcome else {
         return Outcome::Success;
     };
     match failure.code() {
         crate::failures::USAGE => Outcome::Usage,
+        timbre_kernel::failures::USAGE => {
+            log!(
+                ctx,
+                error,
+                crate::log_events::USAGE,
+                reason = failure.public_message()
+            );
+            Outcome::Usage
+        }
         crate::failures::REPORTED => Outcome::Reported,
         _ => Outcome::Failed(failure),
     }
@@ -76,7 +85,9 @@ pub(crate) fn classify(outcome: Fallible) -> Outcome {
 /// Propagates the handler's failure; an unknown command is `timbre.usage`.
 pub(crate) async fn dispatch(ctx: &Ctx, kernel: &Kernel, args: &[String]) -> Fallible {
     let Some((handler, rest)) = kernel.find_command(args) else {
-        help_list(ctx, kernel);
+        // The usage failure is the answer here; a stdout that cannot take
+        // the command list does not change what went wrong.
+        let _ = help_list(ctx, kernel);
         return Err(Box::new(TimbreFailure::Usage) as Box<dyn Failure>);
     };
     handler(ctx.clone(), rest).await
@@ -119,20 +130,14 @@ fn serve(ctx: Ctx, _rest: Vec<String>) -> BoxFuture<Fallible> {
         log!(ctx, info, STARTED, listen = listen.as_str());
         ctx.publish(&Started);
         ctx.kernel().start_jobs(&ctx);
-        let outcome = timbre_edge_http::serve(ctx.clone(), (*http).clone()).await;
-        // The server stopped accepting and drained. A drain that expired
-        // with responses still in flight is noticed only inside `edge/http`
-        // -- `serve` reports it neither in its result nor through a port --
-        // so `timbre.stopped` is the last word the binary can honestly log.
-        log!(ctx, info, STOPPED);
-        outcome
+        timbre_edge_http::serve(ctx, (*http).clone()).await
     })
 }
 
 fn help(ctx: Ctx, _rest: Vec<String>) -> BoxFuture<Fallible> {
     Box::pin(async move {
-        help_list(&ctx, ctx.kernel());
-        Ok(())
+        let kernel = ctx.kernel();
+        help_list(&ctx, kernel)
     })
 }
 
@@ -158,22 +163,16 @@ fn db_prune(ctx: Ctx, rest: Vec<String>) -> BoxFuture<Fallible> {
     })
 }
 
-/// The usage line plus one `timbre.help` line per registered command.
-fn help_list(ctx: &Ctx, kernel: &Kernel) {
-    log!(
-        ctx,
-        info,
-        HELP,
-        text = "usage: timbre [--config <path>] <command> [args]"
-    );
+/// The usage line plus one line per registered command, on stdout: a
+/// command's own output never depends on the log filter.
+fn help_list(ctx: &Ctx, kernel: &Kernel) -> Fallible {
+    ctx.say(format_args!(
+        "usage: timbre [--config <path>] <command> [args]"
+    ))?;
     for command in kernel.commands() {
-        log!(
-            ctx,
-            info,
-            HELP,
-            text = format!("  {:18} {}", command.name, command.help)
-        );
+        ctx.say(format_args!("  {:18} {}", command.name, command.help))?;
     }
+    Ok(())
 }
 
 #[cfg(test)]

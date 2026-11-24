@@ -1,9 +1,9 @@
 use crate::config::Settings;
 use crate::group::{self, AlbumGroup};
-use crate::store::{all, exec, one, unix_millis};
+use crate::store::{all, exec, one};
 use crate::{credits, group::Song};
 use std::collections::{BTreeMap, BTreeSet};
-use std::time::{Duration, SystemTime};
+use std::time::Duration;
 use timbre_edge_config::serde;
 use timbre_edge_sqlite::rusqlite::{Connection, params};
 use timbre_edge_sqlite::{Database, json};
@@ -11,6 +11,7 @@ use timbre_edge_tags::{Advisory, Fields};
 use timbre_edge_text::{fold, order_name};
 use timbre_kernel::Fallible;
 use timbre_kernel::catalog::{ExplicitStatus, ItemDate};
+use timbre_kernel::clock::now_unix_millis;
 
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(crate = "timbre_edge_config::serde")]
@@ -138,7 +139,7 @@ fn write(
     );
     let metadata = aggregate(group, fields, compilation.is_some());
     let order = order_name(metadata.sort_name.as_deref().unwrap_or(&name));
-    let timestamp = unix_millis(SystemTime::now());
+    let timestamp = now_unix_millis();
     let duration = group.songs.iter().fold(Duration::ZERO, |sum, (song, _)| {
         sum.saturating_add(song.source.properties.duration)
     });

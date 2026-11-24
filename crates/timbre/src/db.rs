@@ -3,7 +3,7 @@
 //! opened and migrated once, so a `db` command never opens the file again.
 
 use crate::failures::TimbreFailure;
-use crate::log_events::{DB_BACKUP, DB_CHECK, DB_PRUNE, USAGE};
+use crate::log_events::{DB_CHECK, USAGE};
 use std::path::Path;
 use timbre_kernel::{Ctx, Failure, Fallible, Kernel, log};
 
@@ -27,7 +27,7 @@ pub(crate) fn unknown_verb(ctx: &Ctx, verb: &str) -> Fallible {
     )
 }
 
-/// `timbre db check`: the integrity check, reported under `timbre.db_check`.
+/// `timbre db check`: report the integrity check.
 /// A check that ran and found corruption exits 1 like any failed command; a
 /// bad word after `check` is a usage error.
 pub(crate) fn check(
@@ -42,10 +42,7 @@ pub(crate) fn check(
         );
     }
     match database.check() {
-        Ok(()) => {
-            log!(ctx, info, DB_CHECK, ok = true);
-            Ok(())
-        }
+        Ok(()) => ctx.say(format_args!("Database integrity check passed.")),
         Err(failure) => {
             log!(
                 ctx,
@@ -87,8 +84,10 @@ pub(crate) fn backup(
         );
     }
     database.backup(path, force)?;
-    log!(ctx, info, DB_BACKUP, to = path.display().to_string());
-    Ok(())
+    ctx.say(format_args!(
+        "Database backed up to {:?}.",
+        path.to_string_lossy()
+    ))
 }
 
 /// `timbre db prune [--yes]`: `--yes` is accepted in any position; anything
@@ -113,25 +112,17 @@ pub(crate) fn prune(
         .map(timbre_kernel::Migration::module)
         .collect();
     let unowned = database.owned_tables(&registered)?;
-    if !confirmed {
-        log!(
-            ctx,
-            info,
-            DB_PRUNE,
-            tables = unowned.join(",").as_str(),
-            dropped = false
-        );
-        return Ok(());
-    }
-    database.drop_tables(&unowned)?;
-    log!(
-        ctx,
-        info,
-        DB_PRUNE,
-        tables = unowned.join(",").as_str(),
-        dropped = true
-    );
-    Ok(())
+    let action = if confirmed {
+        database.drop_tables(&unowned)?;
+        "Dropped"
+    } else {
+        "Would drop"
+    };
+    ctx.say(format_args!(
+        "{action} {} unowned tables: {:?}",
+        unowned.len(),
+        unowned
+    ))
 }
 
 /// Whether any word is exactly `flag`: `--force` and `--yes` are accepted in

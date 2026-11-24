@@ -1,11 +1,13 @@
 //! Registration: modules declare their handlers and ports on a `Registry`,
 //! which the binary finishes into the shared `Kernel`.
 
+mod config;
+
 use crate::Resources;
 use crate::bus::{Bus, Handler, Signal};
 use crate::command::{Command, CommandHandler, CommandTable};
 use crate::credential::{
-    CredentialKind, CredentialProvider, CredentialTable, Throttle, owner_label,
+    CredentialKind, CredentialProvider, CredentialTable, Throttle, owner_label, throttled,
 };
 use crate::failure::Fallible;
 use crate::failures::KernelFailure;
@@ -33,8 +35,10 @@ pub struct Kernel {
     permissions: Vec<PermissionEntry>,
     credentials: CredentialTable,
     throttle: Option<Arc<dyn Throttle>>,
+    pub(crate) throttled: throttled::Throttled,
     migrations: Vec<Migration>,
     commands: CommandTable,
+    config_checks: Vec<fn(&crate::Ctx) -> Fallible>,
 }
 
 impl Kernel {
@@ -64,6 +68,10 @@ impl Kernel {
         kind: CredentialKind,
     ) -> Option<&Arc<dyn CredentialProvider>> {
         self.credentials.get(kind)
+    }
+
+    pub(crate) fn accepts_userless(&self, kind: CredentialKind) -> bool {
+        self.credentials.accepts_userless(kind)
     }
 
     /// The registered brute-force limiter, if a module provided one.
@@ -136,6 +144,7 @@ pub struct Registry {
     throttle_owner: Option<&'static str>,
     migrations: Vec<Migration>,
     commands: CommandTable,
+    config_checks: Vec<fn(&crate::Ctx) -> Fallible>,
     /// The module whose registration step is running right now, named by
     /// `Registry::module`; owners of credential kinds and of the throttle are
     /// attributed to it so a clash can name both modules.
@@ -264,12 +273,30 @@ impl Registry {
         kind: CredentialKind,
         provider: Arc<dyn CredentialProvider>,
     ) -> Fallible {
-        self.credentials.add(kind, provider, self.registering)
+        self.credentials
+            .add(kind, provider, self.registering, false)
     }
 
-    /// Declare the single brute-force limiter consulted before every
-    /// credential check. It is a kernel-owned service, not a port: exactly
-    /// one may exist and only the kernel calls it.
+    /// Register a scheme whose provider can check credentials with no user.
+    ///
+    /// # Errors
+    ///
+    /// `kernel.credential_kind_taken` when the scheme already has a provider.
+    pub fn userless_scheme(
+        &mut self,
+        name: crate::credential::SchemeName,
+        provider: Arc<dyn CredentialProvider>,
+    ) -> Fallible {
+        self.credentials.add(
+            CredentialKind::Scheme(name),
+            provider,
+            self.registering,
+            true,
+        )
+    }
+
+    /// Declare the kernel's single brute-force limiter and start its
+    /// reporting job when the server starts.
     ///
     /// # Errors
     ///
@@ -281,6 +308,8 @@ impl Registry {
                 second: owner_label(self.registering),
             }));
         }
+        self.jobs
+            .add(crate::log_events::AUTH_THROTTLED, throttled::run)?;
         self.throttle_owner = self.registering;
         self.throttle = Some(throttle);
         Ok(())
@@ -362,8 +391,10 @@ impl Registry {
             permissions: self.permissions,
             credentials: self.credentials,
             throttle: self.throttle,
+            throttled: throttled::Throttled::default(),
             migrations: self.migrations,
             commands: self.commands,
+            config_checks: self.config_checks,
         })
     }
 }

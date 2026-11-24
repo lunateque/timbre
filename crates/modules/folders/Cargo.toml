@@ -10,6 +10,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+timbre-edge-config.workspace = true
 timbre-kernel.workspace = true
 
 [dev-dependencies]

@@ -72,7 +72,8 @@ pub enum LibraryFile {
 /// Browse roots and their on-disk trees. Calls may block on storage, so
 /// asynchronous callers should use [`Ctx::blocking`]. Every method serves at
 /// most [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) items; a larger `limit` is
-/// refused with the provider's argument failure.
+/// refused with `kernel.page_too_large`. Concurrent inserts or deletes can
+/// shift later offset pages.
 pub trait LibraryTree: Port {
     /// Roots in configuration order, then id.
     ///

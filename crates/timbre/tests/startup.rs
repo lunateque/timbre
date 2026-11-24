@@ -37,16 +37,16 @@ fn run_with(log_value: &str, args: &[&str]) -> (Vec<String>, Option<i32>) {
 
 #[test]
 fn help_lists_the_built_in_commands() {
-    let (lines, code) = run_with("info", &["help"]);
+    // `warn` hides every log line, so what stdout keeps is the list itself.
+    let (lines, code) = run_with("warn", &["help"]);
     assert_eq!(code, Some(0), "`help` exits 0");
     let joined = lines.join("\n");
     let listed = |needle: &str| {
         lines
             .iter()
-            .any(|line| line.contains(r#""event":"timbre.help""#) && line.contains(needle))
+            .any(|line| !line.starts_with('{') && line.contains(needle))
     };
-    // Only the binary's own commands are asserted: which module commands
-    // exist is the generated `modules.rs`'s business.
+    // Only built-ins are asserted: module commands are `modules.rs`'s business.
     assert!(listed("serve"), "serve is listed: {joined}");
     assert!(listed("db check"), "db check is listed: {joined}");
     assert!(listed("db backup"), "db backup is listed: {joined}");

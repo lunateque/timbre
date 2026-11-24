@@ -1,5 +1,5 @@
 //! The `timbre db` commands' exit behavior, observed through the real binary.
-//! Piped stdout is never a terminal, so every line here is JSON.
+//! Results are text on stdout; diagnostics use the JSON log.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -106,7 +106,7 @@ fn an_existing_backup_destination_without_force_exits_two() {
         !second
             .0
             .iter()
-            .any(|line| line.contains(r#""event":"timbre.db_backup""#)),
+            .any(|line| line.starts_with("Database backed up")),
         "a usage error is not a backup result: {:?}",
         second.0
     );
@@ -162,4 +162,26 @@ fn a_wrong_flag_under_the_other_command_is_a_usage_error() {
     let pruned = run_in_dir(&dir, &["db", "prune", "--force"]);
     assert_eq!(pruned.1, Some(2), "`prune --force` exits 2");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn database_results_are_not_subject_to_log_filtering() {
+    let dir = temp_data_dir("unfiltered");
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_timbre"))
+            .env("TIMBRE_LOG", "error")
+            .env("TIMBRE_SERVER__DATA_DIR", dir.path())
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        String::from_utf8(output.stdout).unwrap()
+    };
+    assert_eq!(
+        run(&["db", "check"]).trim_end(),
+        "Database integrity check passed."
+    );
+    let backup = dir.path().join("backup.db");
+    assert!(run(&["db", "backup", backup.to_str().unwrap()]).starts_with("Database backed up to"));
+    assert!(run(&["db", "prune"]).starts_with("Would drop 0 unowned tables"));
 }

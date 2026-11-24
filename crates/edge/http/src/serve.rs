@@ -2,6 +2,8 @@
 //!
 //! One request's path lives in [`crate::request`].
 
+mod drain;
+
 use crate::config::HttpConfig;
 use crate::detect;
 use crate::failures::HttpFailure;
@@ -73,6 +75,7 @@ async fn run(ctx: Ctx, config: HttpConfig) -> Fallible {
         trusted,
         slots: Arc::new(Semaphore::new(MAX_CONNECTIONS)),
         per_client: Arc::new(Mutex::new(HashMap::new())),
+        requests: drain::Requests::new(),
     });
     let mut listeners = Vec::new();
     for entry in &limits.config.listen {
@@ -106,7 +109,9 @@ async fn run(ctx: Ctx, config: HttpConfig) -> Fallible {
                     // other client of the global slot pool. A peer listed in
                     // `trusted_proxies` is exempt: behind a proxy every real
                     // client shares the proxy's one address, so the cap
-                    // there would lock the whole deployment out.
+                    // there would lock the whole deployment out. The address
+                    // stays as it arrived until trust has been decided: an
+                    // IPv6 entry must still see a mapped peer's v6 form.
                     let client = match limits.admit(peer.ip()) {
                         Admission::Admitted(ticket) => ticket,
                         Admission::Full => {
@@ -138,18 +143,10 @@ async fn run(ctx: Ctx, config: HttpConfig) -> Fallible {
     // Stop accepting; in-flight connections keep their permits and are waited
     // for by the drain below.
     accepting.shutdown().await;
-    // Drain in-flight responses for a bounded moment; whatever is still open
-    // after it is closed when the runtime goes away.
-    let drain = match Arc::try_unwrap(graceful) {
-        Ok(shutdown) => shutdown.shutdown(),
-        // A leaked accept task can keep the Arc alive; watching is then over,
-        // and the runtime teardown closes the connections.
-        Err(_) => return Ok(()),
-    };
-    if tokio::time::timeout(DRAIN_TIMEOUT, drain).await.is_err() {
-        // The drain expired with responses still open: hyper's per-connection
-        // graceful shutdown already signalled them, so nothing dangles.
+    if let Ok(shutdown) = Arc::try_unwrap(graceful) {
+        let _ = tokio::time::timeout(DRAIN_TIMEOUT, shutdown.shutdown()).await;
     }
+    limits.requests.finish().await;
     Ok(())
 }
 
@@ -185,6 +182,7 @@ pub(crate) struct Limits {
     /// untrusted peers are counted, so one entry per real client, never one
     /// per proxied browser.
     per_client: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    requests: drain::Requests,
 }
 
 /// One admitted peer connection; dropping it frees the peer's slot.
@@ -219,11 +217,14 @@ enum Admission {
 impl Limits {
     /// Take one per-client slot for `peer`. A peer inside `trusted_proxies`
     /// is exempt and never counted: behind it every real client shares the
-    /// proxy's one address.
+    /// proxy's one address. Trust is decided on the address as accepted;
+    /// the count is kept under its canonical form, so a mapped and a plain
+    /// IPv4 peer share one quota.
     fn admit(&self, peer: IpAddr) -> Admission {
         if self.trusted.iter().any(|proxy| proxy.contains(peer)) {
             return Admission::Admitted(None);
         }
+        let peer = peer.to_canonical();
         let mut counts = self
             .per_client
             .lock()
@@ -288,7 +289,12 @@ async fn drive(
     let service = service_fn(move |request| {
         let ctx = Ctx::clone(&ctx);
         let limits = Arc::clone(&limits);
-        async move { Ok::<_, std::convert::Infallible>(handle(ctx, limits, peer, request).await) }
+        async move {
+            limits
+                .requests
+                .run(handle(ctx, Arc::clone(&limits), peer, request))
+                .await
+        }
     });
     let mut builder = AutoBuilder::new(TokioExecutor::new());
     builder

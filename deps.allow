@@ -24,3 +24,6 @@ notify applies native filesystem notifications across platforms
 icu_normalizer canonically decomposes Unicode for search
 icu_casemap applies the full Unicode case fold
 icu_properties identifies combining marks, punctuation and CJK scripts
+sha2 hashes device secrets with SHA-256, the digest `auth` stores instead of the secret
+subtle compares digests in constant time, so a wrong secret leaks nothing by how long it took
+getrandom draws device secrets from the operating system's generator

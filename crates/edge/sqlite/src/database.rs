@@ -160,6 +160,24 @@ impl Database {
         value
     }
 
+    /// Run related queries on a pooled reader in one consistent SQLite snapshot.
+    ///
+    /// # Errors
+    ///
+    /// The same failures as [`Database::read`], including a query failure
+    /// when the read transaction cannot begin or commit.
+    pub fn read_transaction<T>(
+        &self,
+        work: impl FnOnce(&Connection) -> Fallible<T>,
+    ) -> Fallible<T> {
+        self.read(|connection| {
+            let transaction = connection.unchecked_transaction().map_err(query_error)?;
+            let value = work(&transaction)?;
+            transaction.commit().map_err(query_error)?;
+            Ok(value)
+        })
+    }
+
     /// Borrow a reader or fail with `sqlite.busy`.
     fn lease(&self) -> Fallible<Lease<'_>> {
         self.readers

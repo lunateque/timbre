@@ -77,20 +77,20 @@ fn non_finite_float_is_json_null() {
 }
 
 #[test]
-fn control_characters_escape_as_unicode() {
-    let sink = Shared::default();
-    let kernel = kernel(sink.clone(), Format::Json, "info");
-    let ctx = Ctx::root(&kernel);
-    let one = char::from_u32(1).expect("U+0001 is a scalar value");
-    let input = one.to_string();
-    log!(ctx, info, GREETED, s = input.as_str());
-    assert!(kernel.logger().flush());
-    // Raw string: a literal backslash, u, 0, 0, 0, 1 in the output.
-    assert!(
-        sink.text().contains(r#""s":"\u0001""#),
-        "U+0001 must escape, got {}",
-        sink.text()
-    );
+fn control_characters_escape_as_unicode_in_both_formats() {
+    let input = "\u{1}\u{7f}\u{85}\u{9f}\u{2028}\u{2029}\u{202a}\u{202e}\u{2066}\u{2069}";
+    let escaped = r#""\u0001\u007f\u0085\u009f\u2028\u2029\u202a\u202e\u2066\u2069""#;
+    for format in [Format::Pretty, Format::Json] {
+        let sink = Shared::default();
+        let kernel = kernel(sink.clone(), format, "info");
+        log!(Ctx::root(&kernel), info, GREETED, s = input);
+        assert!(kernel.logger().flush());
+        assert!(
+            sink.text().contains(escaped),
+            "{format:?}: {:?}",
+            sink.text()
+        );
+    }
 }
 
 #[test]

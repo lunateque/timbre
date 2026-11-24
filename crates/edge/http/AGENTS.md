@@ -41,7 +41,11 @@ of any future line too. A `X-Forwarded-For` arriving as several header
 lines is joined into one list, wire order, before the rightmost-untrusted
 rule runs; scanning right to left, a hop that does not parse as an address
 (a proxy appending `unknown`) stops the scan and the peer is used, so a
-client-forged left hop is never blamed for what the peer did. The kernel
+client-forged left hop is never blamed for what the peer did. IPv4-mapped
+IPv6 peers and forwarded hops are treated as IPv4 for proxy trust,
+connection limits and request identity; a trusted entry written as an IPv6
+network is still matched against the address as it arrived, so `::/0` and
+prefixes wider than the mapped range cover a mapped peer too. The kernel
 `Response`'s framing headers (`content-length`,
 `transfer-encoding`, `connection`, `keep-alive`, `upgrade`) are dropped
 so hyper derives them from the body it serves, with one exception: a
@@ -81,8 +85,13 @@ zero would refuse every peer forever; a peer over the cap is
 closed at once and logged as `http.connections_full`, and peers listed in
 `trusted_proxies` are exempt because behind a proxy every client shares
 the proxy's one address), and a 10 s
-drain of in-flight responses on shutdown. A streaming response body that
-fails mid-flight cannot change the head any more; the failure logs as
+drain of in-flight responses on shutdown. The service waits for tracked
+request futures (including separately polled HTTP/2 requests) to finish or be
+cancelled after the graceful shutdown grace. It does not wait for work
+detached from those futures, including a blocking closure whose
+`Ctx::blocking` awaiter was cancelled. The edge does not publish
+`ServerDrained`; the binary does that after the service returns. A streaming
+response body that fails mid-flight cannot change the head any more; the failure logs as
 `http.stream_failed` with its code. Every accepted socket gets TCP
 keepalive (idle 30 s, probes every 15 s, four misses kill it), and every
 response write runs behind a configurable send-stall guard

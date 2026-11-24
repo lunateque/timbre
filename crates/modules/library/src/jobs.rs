@@ -15,11 +15,12 @@ const MAX_PENDING: usize = 16_384;
 
 pub(crate) fn scan(ctx: Ctx) -> BoxFuture<Fallible> {
     Box::pin(async move {
-        let settings = Settings::get(&ctx)?;
+        let library = crate::state(&ctx)?;
+        let settings = Arc::clone(crate::settings(library.as_ref())?);
         if !settings.scan_on_start || settings.roots.is_empty() {
             return Ok(());
         }
-        let running = match Running::begin(crate::state(&ctx)?) {
+        let running = match Running::begin(library) {
             Ok(running) => running,
             Err(error) if error.code() == SCAN_RUNNING => return Ok(()),
             Err(error) => return Err(error),
@@ -27,13 +28,15 @@ pub(crate) fn scan(ctx: Ctx) -> BoxFuture<Fallible> {
         scan::stoppable(&ctx, move |stop, ctx| {
             scan::run(&ctx, &running, &settings, false, &stop)
         })
-        .await
+        .await?;
+        Ok(())
     })
 }
 
 pub(crate) fn watch(ctx: Ctx) -> BoxFuture<Fallible> {
     Box::pin(async move {
-        let settings = Settings::get(&ctx)?;
+        let library = crate::state(&ctx)?;
+        let settings = Arc::clone(crate::settings(library.as_ref())?);
         if !settings.watch || settings.roots.is_empty() {
             return Ok(());
         }
@@ -54,7 +57,9 @@ fn watching(ctx: &Ctx, settings: &Settings, stop: &Arc<AtomicBool>) -> Fallible 
         }
         if let Some(scope) = pending.ready() {
             match Running::begin(Arc::clone(&library)) {
-                Ok(run) => scan::run_watched(ctx, &run, settings, stop, &scope)?,
+                Ok(run) => {
+                    scan::run_watched(ctx, &run, settings, stop, &scope)?;
+                }
                 // The paths stay queued until a pass can take them.
                 Err(error) if error.code() == SCAN_RUNNING => pending.restore(scope),
                 Err(error) => return Err(error),

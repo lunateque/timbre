@@ -34,9 +34,11 @@
 pub mod artwork;
 mod bus;
 pub mod catalog;
+pub mod clock;
 pub mod command;
 pub mod credential;
 mod ctx;
+pub mod directory;
 mod failure;
 pub mod folders;
 mod future;
@@ -66,15 +68,15 @@ pub mod testing;
 pub use bus::{Handler, Signal};
 pub use command::{Command, CommandHandler};
 pub use credential::{
-    AuthOutcome, Credential, CredentialKind, CredentialProvider, RejectReason, SchemeName,
-    Throttle, Verdict,
+    AuthOutcome, Credential, CredentialKind, CredentialProvider, RejectDetail, RejectReason,
+    SchemeName, Throttle, Verdict,
 };
 pub use ctx::{Ctx, RequestId};
 pub use failure::{Failure, FailureCode, Fallible};
 pub use future::{BoxFuture, block_on};
 pub use guard::{Authorized, Denial, Extraction, Guard};
-pub use identity::{Identity, Permission, PermissionEntry, Principal, UserId, UserName};
-pub use jobs::JobHandler;
+pub use identity::{Identity, Permission, PermissionEntry, Principal, UserName};
+pub use jobs::{JobHandler, run_periodic};
 pub use log::{Clock, Format, Level, LogEvent, LogFilter, LogValue, Logger, Value};
 pub use migration::Migration;
 pub use page::{Cursor, MAX_PAGE_LIMIT, Page, PageRequest};

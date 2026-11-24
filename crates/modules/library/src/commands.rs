@@ -1,33 +1,46 @@
-use crate::config::{Settings, shared_db};
-use crate::failures::LibraryFailure;
-use crate::log_events::EXPLAINED;
+use crate::config::shared_db;
 use crate::scan::{self, Running};
 use crate::store::{all, one, path_to_bytes};
 use std::path::Path;
+use std::sync::Arc;
 use timbre_edge_sqlite::json;
 use timbre_edge_sqlite::rusqlite::params;
-use timbre_kernel::{BoxFuture, Ctx, Fallible, log};
+use timbre_kernel::{BoxFuture, Ctx, Failure, Fallible, failures::KernelFailure};
 
 pub(crate) fn scan(ctx: Ctx, args: Vec<String>) -> BoxFuture<Fallible> {
     Box::pin(async move {
         let full = match args.as_slice() {
             [] => false,
             [arg] if arg == "--full" => true,
-            _ => return Err(LibraryFailure::Argument.boxed()),
+            _ => {
+                return Err(
+                    Box::new(KernelFailure::Usage("library scan [--full]")) as Box<dyn Failure>
+                );
+            }
         };
-        let settings = Settings::get(&ctx)?;
-        let running = Running::begin(crate::state(&ctx)?)?;
-        scan::stoppable(&ctx, move |stop, ctx| {
+        let library = crate::state(&ctx)?;
+        let settings = Arc::clone(crate::settings(library.as_ref())?);
+        let running = Running::begin(library)?;
+        let outcome = scan::stoppable(&ctx, move |stop, ctx| {
             scan::run(&ctx, &running, &settings, full, &stop)
         })
-        .await
+        .await?;
+        ctx.say(format_args!(
+            "{}",
+            match outcome {
+                scan::Outcome::Complete => "Library scan complete.",
+                scan::Outcome::Stopped => "Library scan stopped.",
+            }
+        ))
     })
 }
 
 pub(crate) fn explain(ctx: Ctx, args: Vec<String>) -> BoxFuture<Fallible> {
     Box::pin(async move {
         let [path] = args.as_slice() else {
-            return Err(LibraryFailure::Argument.boxed());
+            return Err(
+                Box::new(KernelFailure::Usage("library explain <path>")) as Box<dyn Failure>
+            );
         };
         let path = std::path::absolute(path).map_err(crate::failures::io)?;
         let scoped = ctx.clone();
@@ -47,15 +60,15 @@ fn describe(ctx: &Ctx, path: &Path) -> Fallible {
         let credits: Vec<_> = credits.iter().map(|credit| (&credit.role, &credit.sub_role, &credit.artist.id, &credit.artist.name, &credit.join_phrase)).collect();
         let lyrics = all(sql, "SELECT source,language,synced,path FROM library_lyrics WHERE track_id=?1 ORDER BY position", [track], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, bool>(2)?, crate::store::optional_path(row, 3)?.map(|path| path.to_string_lossy().into_owned()))))?;
         let diagnostics = all(sql, "SELECT kind,detail FROM library_diagnostics WHERE track_id=?1 ORDER BY kind", [track], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
-        log!(ctx, info, EXPLAINED,
-            path = path.to_string_lossy().as_ref(), track_id = track, fingerprint = item.fingerprint.as_deref().unwrap_or_default(),
-            album_key = item.key, key_source = item.key_source, grouping_inputs = item.group,
-            compilation_source = item.compilation.as_deref().unwrap_or_default(), credits = json::encode(&credits)?.as_str(),
-            art_id = item.art.as_deref().unwrap_or_default(), art_source = item.art_source.as_deref().unwrap_or_default(),
-            art_path = item.art_path.as_deref().map(Path::to_string_lossy).as_deref().unwrap_or_default(),
-            lyric_sources = json::encode(&lyrics)?.as_str(), diagnostics = json::encode(&diagnostics)?.as_str(),
-        );
-        Ok(())
+        ctx.say(format_args!(
+            "path={:?}  track_id={track}  fingerprint={:?}  album_key={:?}  key_source={:?}  grouping_inputs={:?}  compilation_source={:?}  credits={}  art_id={:?}  art_source={:?}  art_path={:?}  lyric_sources={}  diagnostics={}",
+            path.to_string_lossy(),
+            item.fingerprint.as_deref().unwrap_or_default(), item.key, item.key_source, item.group,
+            item.compilation.as_deref().unwrap_or_default(), json::encode(&credits)?,
+            item.art.as_deref().unwrap_or_default(), item.art_source.as_deref().unwrap_or_default(),
+            item.art_path.as_deref().map(Path::to_string_lossy).as_deref().unwrap_or_default(),
+            json::encode(&lyrics)?, json::encode(&diagnostics)?,
+        ))
     })
 }
 

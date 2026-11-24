@@ -93,6 +93,6 @@ fn an_unreadable_tree_fails_the_index_instead_of_serving_an_empty_one() {
 fn an_absent_folder_answers_with_the_folders_code() {
     let (ctx, folders) = browse(FailureCode::new("library.not_found"));
 
-    let failure = folders.directory(&ctx, "404", None, PAGE).unwrap_err();
+    let failure = folders.folder(&ctx, "404", None, PAGE).unwrap_err();
     assert_eq!(failure.code().as_str(), "folders.not_found");
 }

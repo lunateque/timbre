@@ -154,7 +154,7 @@ impl CredentialProvider for FakeProvider {
                 permissions: vec![READ],
             })
         } else {
-            Verdict::Rejected(RejectReason::Invalid)
+            Verdict::Rejected(RejectReason::Invalid, None)
         };
         Box::pin(async move { verdict })
     }

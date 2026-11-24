@@ -35,25 +35,30 @@ impl Trusted {
             let width = if address.is_ipv4() { 32u8 } else { 128 };
             (address, width)
         };
+        let (address, bits) = match (address, address.to_canonical()) {
+            (IpAddr::V6(_), ipv4 @ IpAddr::V4(_)) if bits >= 96 => (ipv4, bits - 96),
+            _ => (address, bits),
+        };
         Ok(Trusted {
             network: address,
             bits,
         })
     }
 
-    /// Whether `address` is inside this trusted network.
+    /// Whether `address` is inside this trusted network. A V4 network is
+    /// compared against the canonical peer, so a mapped V4 peer matches it;
+    /// a V6 network is compared against the peer as given, so entries wider
+    /// than the mapped range (`::/0`, `::ffff:0:0/64`) still cover it.
     #[must_use]
     pub(crate) fn contains(self, address: IpAddr) -> bool {
-        let (left, right) = match (self.network, address) {
-            (IpAddr::V4(network), IpAddr::V4(probe)) => (
+        let (left, right) = match (self.network, address.to_canonical(), address) {
+            (IpAddr::V4(network), IpAddr::V4(probe), _) => (
                 u128::from(Octets::from(network)),
                 u128::from(Octets::from(probe)),
             ),
-            (IpAddr::V6(network), IpAddr::V6(probe)) => {
+            (IpAddr::V6(network), _, IpAddr::V6(probe)) => {
                 (Octets::from(network).into(), Octets::from(probe).into())
             }
-            // A v4 peer is never inside a v6 prefix: `::ffff:127.0.0.1` must
-            // be listed as an IPv6 prefix to be trusted.
             _ => return false,
         };
         // A /0 prefix covers every address of its family (the family check
@@ -132,11 +137,15 @@ pub(crate) fn forwarded_for(headers: &[(String, Vec<u8>)]) -> Option<String> {
 /// believing a possibly forged left part.
 #[must_use]
 pub(crate) fn client_address(peer: IpAddr, forwarded: Option<&str>, trusted: &[Trusted]) -> IpAddr {
+    // Trust is decided on each address as it arrived: `contains` already
+    // canonicalizes for a V4 network, while a V6 network such as `::/0`
+    // only matches the mapped form. What this returns is canonical, so
+    // throttle keys and log lines spell one client one way.
     if !trusted.iter().any(|proxy| proxy.contains(peer)) {
-        return peer;
+        return peer.to_canonical();
     }
     let Some(list) = forwarded else {
-        return peer;
+        return peer.to_canonical();
     };
     let hops: Vec<&str> = list
         .split(',')
@@ -147,14 +156,14 @@ pub(crate) fn client_address(peer: IpAddr, forwarded: Option<&str>, trusted: &[T
         let Ok(address) = hop.parse::<IpAddr>() else {
             // The first hop that does not name an address is the trusted
             // proxy's own "unknown": nothing left of it is verifiable.
-            return peer;
+            return peer.to_canonical();
         };
         if !trusted.iter().any(|proxy| proxy.contains(address)) {
-            return address;
+            return address.to_canonical();
         }
     }
     // Every hop was a trusted proxy: the peer is the only real address left.
-    peer
+    peer.to_canonical()
 }
 
 #[cfg(test)]
@@ -190,6 +199,67 @@ mod tests {
                 .expect("an address"),
             "the left part is forged; this proxy appended the right end"
         );
+    }
+
+    #[test]
+    fn mapped_addresses_match_ipv4_proxy_ranges_and_return_ipv4_clients() {
+        let trusted = trust(&["10.0.0.0/8"]);
+        let peer = "::ffff:10.0.0.5".parse().expect("an address");
+        let client: IpAddr = "192.0.2.1".parse().expect("an address");
+        assert!(trusted[0].contains(peer));
+        assert_eq!(
+            client_address(peer, Some("::ffff:192.0.2.1, ::ffff:10.0.0.6"), &trusted),
+            client,
+        );
+    }
+
+    #[test]
+    fn configured_mapped_cidr_matches_the_same_ipv4_range() {
+        let trusted = trust(&["::ffff:10.0.0.0/104"]);
+        let ipv4 = "10.50.0.5".parse().expect("an address");
+        let mapped = "::ffff:10.50.0.5".parse().expect("an address");
+        let outside = "::ffff:11.0.0.5".parse().expect("an address");
+        assert!(trusted[0].contains(ipv4));
+        assert!(trusted[0].contains(mapped));
+        assert!(!trusted[0].contains(outside));
+    }
+
+    #[test]
+    fn wide_ipv6_networks_cover_mapped_and_native_peers() {
+        // `::/0` and a mapped-range prefix shorter than /96 are V6 networks
+        // no canonical V4 peer can match, so the peer as given decides.
+        for entry in ["::/0", "::ffff:0:0/64"] {
+            let trusted = trust(&[entry]);
+            let mapped = "::ffff:10.0.0.5".parse().expect("an address");
+            assert!(trusted[0].contains(mapped), "{entry} covers a mapped peer");
+        }
+        let any = trust(&["::/0"]);
+        let native = "2001:db8::1".parse().expect("an address");
+        let plain: IpAddr = "10.0.0.5".parse().expect("an address");
+        assert!(any[0].contains(native), "a native v6 peer is covered");
+        assert!(!any[0].contains(plain), "a v4 peer is not in a v6 network");
+    }
+
+    #[test]
+    fn a_mapped_peer_is_trusted_by_an_ipv6_network_through_client_address() {
+        // What the server really calls is `client_address`: a mapped peer
+        // canonicalized before the trust check would never match `::/0`,
+        // and the forwarded client would be lost.
+        for entry in ["::/0", "::ffff:0:0/64"] {
+            let trusted = trust(&[entry]);
+            let peer = "::ffff:10.0.0.5".parse().expect("an address");
+            let client: IpAddr = "192.0.2.7".parse().expect("an address");
+            assert_eq!(
+                client_address(peer, Some("192.0.2.7"), &trusted),
+                client,
+                "{entry} trusts the mapped peer"
+            );
+        }
+        // An untrusted mapped peer is still reported in its v4 form.
+        let trusted = trust(&["2001:db8::/32"]);
+        let peer = "::ffff:10.0.0.5".parse().expect("an address");
+        let plain: IpAddr = "10.0.0.5".parse().expect("an address");
+        assert_eq!(client_address(peer, Some("192.0.2.7"), &trusted), plain);
     }
 
     #[test]

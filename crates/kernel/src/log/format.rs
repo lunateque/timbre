@@ -24,15 +24,15 @@ fn push_escaped(out: &mut String, text: &str) {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            control @ '\0'..='\u{1f}' => {
-                // Fixed \u00XX with lowercase hex digits, spelled out to keep
-                // the line building with `push` only.
+            control @ ('\0'..='\u{1f}'
+            | '\u{7f}'..='\u{9f}'
+            | '\u{2028}'..='\u{202e}'
+            | '\u{2066}'..='\u{2069}') => {
+                out.push_str("\\u");
                 let code = u32::from(control);
-                let hi = char::from_digit(code / 16, 16).unwrap_or('0');
-                let lo = char::from_digit(code % 16, 16).unwrap_or('0');
-                out.push_str("\\u00");
-                out.push(hi);
-                out.push(lo);
+                for shift in [12, 8, 4, 0] {
+                    out.push(char::from_digit((code >> shift) & 0xf, 16).unwrap_or('0'));
+                }
             }
             other => out.push(other),
         }

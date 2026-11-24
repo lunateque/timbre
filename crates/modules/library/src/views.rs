@@ -1,6 +1,6 @@
 use crate::albums::{self, Metadata};
 use crate::scan::Source;
-use crate::store::{all, one, time, unsigned};
+use crate::store::{all, integer, one, unsigned};
 use std::time::Duration;
 use timbre_edge_sqlite::json;
 use timbre_edge_sqlite::rusqlite::{Connection, params};
@@ -8,6 +8,7 @@ use timbre_kernel::Fallible;
 use timbre_kernel::catalog::{
     Album, Artist, CompilationSource, DiscTitle, Movement, ReplayGain, Track,
 };
+use timbre_kernel::clock::from_unix_millis;
 
 pub(crate) fn artist(sql: &Connection, id: i64) -> Fallible<Artist> {
     let (name, sort_name, order_name, musicbrainz_id, cover_art) = one(
@@ -112,7 +113,7 @@ pub(crate) fn album(sql: &Connection, id: i64) -> Fallible<Album> {
         cover_art: row.art,
         song_count: row.count,
         duration: Duration::from_millis(row.duration),
-        created: time(row.created),
+        created: from_unix_millis(integer(row.created)),
     })
 }
 
@@ -213,7 +214,7 @@ pub(crate) fn track(sql: &Connection, id: i64) -> Fallible<Track> {
         channels: properties.channels,
         bit_depth: properties.bit_depth,
         suffix: source.suffix,
-        created: time(row.created),
+        created: from_unix_millis(integer(row.created)),
     })
 }
 

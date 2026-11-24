@@ -8,8 +8,9 @@ on Unix, and on Unix a database file owned by a different user is refused
 by `sqlite.open_failed` rather than trusted), one writer connection behind
 a mutex and a pool of reader connections opened `SQLITE_OPEN_READ_ONLY`
 (a query cannot change stored data, whatever it says), blocking
-`write`/`read` calls for
-`Ctx::blocking`, a 30 s progress-handler cap on any single statement —
+`write`/`read`/`read_transaction` calls for `Ctx::blocking`. Related queries
+in `read_transaction` see one snapshot. A 30 s progress-handler cap
+applies to any single statement —
 the watchdog is per statement, not per transaction: a transaction may run
 many statements, and each one individually gets the 30 s; a transaction
 made of 100 quick statements legitimately runs for minutes. Every wait for
@@ -35,6 +36,8 @@ lists and drops; a table belongs to the registered module with the longest
 one caller at a time, the others waiting at most 5 s before `sqlite.busy`.
 A failed attempt is reported to its caller only and never remembered: the
 next `get` prepares, opens and migrates again.
+Use `SharedDatabase::require` to look up the host resource without opening
+it, supplying the owning module's failure for a missing resource.
 
 ## Ports
 

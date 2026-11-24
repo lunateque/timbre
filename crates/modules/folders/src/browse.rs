@@ -5,7 +5,7 @@ use std::sync::Arc;
 use crate::failures::BrowseFailure;
 use timbre_kernel::folders::{FolderIndex, Folders, IndexedFolder, Versioned};
 use timbre_kernel::library_tree::{Folder, FolderEntry, LibraryRoot, LibraryTree};
-use timbre_kernel::{Ctx, Cursor, Fallible, MAX_PAGE_LIMIT, Page, PageRequest, Port};
+use timbre_kernel::{Ctx, Fallible, Page, PageRequest, Port, page::Window};
 
 const METADATA: PageRequest<'static> = PageRequest {
     limit: 0,
@@ -18,7 +18,7 @@ impl Port for Browse {}
 
 impl Folders for Browse {
     fn roots(&self, ctx: &Ctx, page: PageRequest<'_>) -> Fallible<Page<LibraryRoot>> {
-        within_cap(page)?;
+        Window::check_limit(page.limit)?;
         tree(ctx)?.roots(ctx, page)
     }
 
@@ -29,7 +29,7 @@ impl Folders for Browse {
         if_modified_since: Option<u64>,
         page: PageRequest<'_>,
     ) -> Fallible<Versioned<Page<FolderIndex>>> {
-        within_cap(page)?;
+        Window::check_limit(page.limit)?;
         let tree = tree(ctx)?;
         let version = tree.tree_version(ctx)?;
         let unchanged = if_modified_since == Some(version);
@@ -80,27 +80,27 @@ impl Folders for Browse {
         if unchanged {
             return Ok(Versioned::NotModified);
         }
-        let offset = offset(page)?;
+        let window = Window::new(page)?;
         let items = groups
             .into_iter()
-            .skip(offset)
-            .take(page.limit.saturating_add(1))
+            .skip(window.offset())
+            .take(window.lookahead())
             .map(|(letter, folders)| FolderIndex { letter, folders })
             .collect();
         Ok(Versioned::Changed {
             version,
-            value: result_page(page, offset, items),
+            value: window.page(items),
         })
     }
 
-    fn directory(
+    fn folder(
         &self,
         ctx: &Ctx,
         id: &str,
         if_modified_since: Option<u64>,
         page: PageRequest<'_>,
     ) -> Fallible<Versioned<Folder>> {
-        within_cap(page)?;
+        Window::check_limit(page.limit)?;
         let tree = tree(ctx)?;
         let version = tree.tree_version(ctx)?;
         let mut directory = folder(ctx, &*tree, id, METADATA)?;
@@ -113,10 +113,10 @@ impl Folders for Browse {
         if if_modified_since == Some(version) {
             return Ok(Versioned::NotModified);
         }
-        let offset = offset(page)?;
-        let mut remaining = offset;
+        let window = Window::new(page)?;
+        let mut remaining = window.offset();
         let mut items = Vec::new();
-        if page.limit != 0 {
+        if window.count() != 0 {
             for_children(ctx, &*tree, id, |item| {
                 if let FolderEntry::Folder { id, ignored, .. } = &item
                     && (*ignored || !visible(ctx, &*tree, id)?)
@@ -128,14 +128,14 @@ impl Folders for Browse {
                 } else {
                     remaining -= 1;
                 }
-                Ok(if items.len() > page.limit {
+                Ok(if items.len() > window.count() {
                     ControlFlow::Break(())
                 } else {
                     ControlFlow::Continue(())
                 })
             })?;
         }
-        directory.children = result_page(page, offset, items);
+        directory.children = window.page(items);
         Ok(Versioned::Changed {
             version,
             value: directory,
@@ -147,15 +147,6 @@ fn tree(ctx: &Ctx) -> Fallible<Arc<dyn LibraryTree>> {
     ctx.ports()
         .get::<dyn LibraryTree>()
         .ok_or_else(|| BrowseFailure::NotAvailable.boxed())
-}
-
-/// A page larger than the kernel's cap is refused, not quietly shortened: a
-/// client that asked for more would read the short page as the end of a list.
-fn within_cap(page: PageRequest<'_>) -> Fallible {
-    if page.limit > MAX_PAGE_LIMIT {
-        return Err(BrowseFailure::PageTooLarge.boxed());
-    }
-    Ok(())
 }
 
 /// A tree provider reports an absent folder with its own `not_found` code;
@@ -240,17 +231,4 @@ fn walk<T>(
             return Ok(false);
         }
     }
-}
-
-fn offset(page: PageRequest<'_>) -> Fallible<usize> {
-    page.cursor
-        .map_or(Ok(0), |cursor| cursor.as_str().parse())
-        .map_err(|_| BrowseFailure::InvalidCursor.boxed())
-}
-
-fn result_page<T>(request: PageRequest<'_>, offset: usize, mut items: Vec<T>) -> Page<T> {
-    let next = (request.limit != 0 && items.len() > request.limit)
-        .then(|| Cursor::new(offset.saturating_add(request.limit).to_string()));
-    items.truncate(request.limit);
-    Page { items, next }
 }

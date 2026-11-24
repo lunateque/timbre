@@ -2,8 +2,13 @@
 
 /// Whether every accepted name obeys the documented alphabet.
 fn in_alphabet(name: &str) -> bool {
-    name.chars()
-        .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-'))
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit())
+        && chars.all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '.' | '_' | '-')
+        })
 }
 
 /// `UserName::normalize` against its contract: the accepted name is exactly

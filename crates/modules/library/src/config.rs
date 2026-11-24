@@ -7,7 +7,7 @@ use timbre_edge_sqlite::SharedDatabase;
 use timbre_kernel::{Ctx, Fallible};
 
 #[derive(serde::Deserialize)]
-#[serde(crate = "timbre_edge_config::serde", default)]
+#[serde(crate = "timbre_edge_config::serde", default, deny_unknown_fields)]
 pub(crate) struct Settings {
     pub(crate) roots: Vec<PathBuf>,
     pub(crate) scan_on_start: bool,
@@ -33,13 +33,13 @@ impl Default for Settings {
 }
 
 impl Settings {
-    pub(crate) fn get(ctx: &Ctx) -> Fallible<Self> {
+    pub(crate) fn load(ctx: &Ctx) -> Fallible<Self> {
         let config = ctx
             .resource::<Config>()
             .ok_or_else(|| LibraryFailure::NotConfigured.boxed())?;
         let settings: Self = config.section("library")?;
         if settings.scan_workers == 0 || settings.tags.values().flatten().any(String::is_empty) {
-            return Err(LibraryFailure::Argument.boxed());
+            return Err(LibraryFailure::InvalidConfig.boxed());
         }
         Ok(settings)
     }
@@ -77,8 +77,7 @@ impl Settings {
 }
 
 pub(crate) fn shared_db(ctx: &Ctx) -> Fallible<Arc<SharedDatabase>> {
-    ctx.resource::<SharedDatabase>()
-        .ok_or_else(|| LibraryFailure::NotConfigured.boxed())
+    SharedDatabase::require(ctx, LibraryFailure::NotConfigured)
 }
 
 fn projected_path(path: &Path) -> Fallible<PathBuf> {

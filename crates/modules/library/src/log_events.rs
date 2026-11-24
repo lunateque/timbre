@@ -3,7 +3,7 @@
 use timbre_kernel::LogEvent;
 
 /// Identity of the startup scan job.
-pub const SCAN: LogEvent = LogEvent::new("library.scan");
+pub const SCAN_RUN: LogEvent = LogEvent::new("library.scan_run");
 /// Identity of the filesystem observation job.
 pub const WATCH: LogEvent = LogEvent::new("library.watch");
 /// A reconcile has entered the scanner.
@@ -19,8 +19,6 @@ pub const FILE_UNREADABLE: LogEvent = LogEvent::new("library.file_unreadable");
 pub const UNREADABLE_SUMMARY: LogEvent = LogEvent::new("library.unreadable_summary");
 /// Multiple audio paths matched the same potential relink key.
 pub const RELINK_AMBIGUOUS: LogEvent = LogEvent::new("library.relink_ambiguous");
-/// The reasons behind one file's catalog mapping.
-pub const EXPLAINED: LogEvent = LogEvent::new("library.explained");
 /// The filesystem backend lost notifications; the next scan reconciles them.
 pub const WATCH_OVERFLOW: LogEvent = LogEvent::new("library.watch_overflow");
 /// An asynchronous user-initiated scan failed.

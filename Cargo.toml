@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/kernel", "crates/timbre", "crates/modules/folders", "crates/modules/hello", "crates/modules/library", "crates/edge/runtime", "crates/edge/http", "crates/edge/sqlite", "crates/edge/config", "crates/edge/tags", "crates/edge/image", "crates/edge/fswatch", "crates/edge/text", "xtask"]
+members = ["crates/kernel", "crates/timbre", "crates/modules/audit", "crates/modules/auth", "crates/modules/auth_guard", "crates/modules/folders", "crates/modules/hello", "crates/modules/library", "crates/edge/runtime", "crates/edge/http", "crates/edge/sqlite", "crates/edge/config", "crates/edge/crypto", "crates/edge/tags", "crates/edge/image", "crates/edge/fswatch", "crates/edge/text", "xtask"]
 # `fuzz/` is its own workspace (own `[workspace]` and lockfile): nightly and
 # clang live there and the stable gate must not resolve or build it.
 exclude = ["fuzz"]
@@ -16,6 +16,7 @@ publish = false
 bytes = "1.12.1"
 fast_image_resize = "=6.2.0"
 form_urlencoded = "1.2.2"
+getrandom = "=0.4.3"
 http = "1.5.0"
 http-body = "1.1.0"
 http-body-util = "0.1.5"
@@ -32,8 +33,11 @@ ra-ap-rustc_lexer = "=0.185.0"
 rusqlite = "0.43.0"
 serde = "1.0.229"
 serde_json = "1.0.154"
+sha2 = "=0.11.1"
 socket2 = { version = "0.6.5", features = ["all"] }
+subtle = "=2.6.1"
 timbre-edge-config = { path = "crates/edge/config" }
+timbre-edge-crypto = { path = "crates/edge/crypto" }
 timbre-edge-fswatch = { path = "crates/edge/fswatch" }
 timbre-edge-http = { path = "crates/edge/http" }
 timbre-edge-image = { path = "crates/edge/image" }
@@ -42,6 +46,9 @@ timbre-edge-sqlite = { path = "crates/edge/sqlite" }
 timbre-edge-tags = { path = "crates/edge/tags" }
 timbre-edge-text = { path = "crates/edge/text" }
 timbre-kernel = { path = "crates/kernel" }
+timbre-audit = { path = "crates/modules/audit" }
+timbre-auth = { path = "crates/modules/auth" }
+timbre-auth_guard = { path = "crates/modules/auth_guard" }
 timbre-folders = { path = "crates/modules/folders" }
 timbre-hello = { path = "crates/modules/hello" }
 timbre-library = { path = "crates/modules/library" }

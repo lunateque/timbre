@@ -131,7 +131,8 @@ pub struct ScanStatus {
 /// Read the music catalog and control rescanning. Calls may block on storage;
 /// asynchronous callers should use [`Ctx::blocking`]. Every method serves at
 /// most [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) items: a larger `limit`, or
-/// a larger search `count`, is refused with `library.argument_invalid`.
+/// a larger search `count`, is refused with `kernel.page_too_large`.
+/// Concurrent inserts or deletes can shift later offset pages.
 pub trait Catalog: Port {
     /// Artists by order name, then id.
     ///

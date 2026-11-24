@@ -140,3 +140,16 @@ fn a_track_whose_write_fails_halfway_leaves_no_rows_behind() {
     );
     assert_eq!(fixture.track("First").title, "First");
 }
+
+#[test]
+fn a_scan_stopped_by_shutdown_says_so() {
+    let fixture = Fixture::new(&["music"]);
+    fixture.flac("album/first.flac", &[("TITLE", "First")]);
+    let (ctx, runtime) = fixture.ctx_with(fixture.data("timbre.db"), false);
+    // Shutdown before the pass begins: the scan stops at its first check.
+    runtime.trigger_shutdown();
+    let args = [String::from("scan")];
+    let (handler, _) = ctx.kernel().find_command(&args).unwrap();
+    block_on(handler(ctx, Vec::new())).unwrap();
+    assert_eq!(fixture.said().trim_end(), "Library scan stopped.");
+}

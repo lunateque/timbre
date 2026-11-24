@@ -21,9 +21,13 @@ consults `Kernel::find_command` only: a module that registers e.g.
 `db vacuum` coexists with them, a module that registers `db check` fails
 registration with `kernel.command_taken` — a built-in is never silently
 shadowed, and a module command is never hidden behind a hard-coded branch.
-On shutdown `serve` logs `timbre.stopped` after the HTTP edge returns from
-its drain, then gives background jobs up to ten seconds to finish
-(`Kernel::wait_jobs`) before the process exits. The process exit is 0 on success, 2 on a usage error (an
+`help` and an unknown command write the usage line and the command table
+to stdout through `Ctx::say`, so the list is there whatever the log filter
+is set to.
+On shutdown `serve` gives background jobs up to ten seconds to finish
+(`Kernel::wait_jobs`), publishes `signals::ServerDrained` so their last
+work reaches the database, and then logs `timbre.stopped`; the HTTP edge
+has already returned from its own drain by then. The process exit is 0 on success, 2 on a usage error (an
 unusable command line, an unknown verb, a backup destination that exists
 without `--force`, a missing target, a wrong-positioned flag; each logged
 as `timbre.usage` with `reason`), 1 on any other failure. `--force` and
@@ -36,7 +40,7 @@ None.
 
 ## Signals
 
-Publishes `signals::Started`.
+Publishes `signals::Started` and `signals::ServerDrained`.
 
 ## Log events
 
@@ -57,15 +61,13 @@ Publishes `signals::Started`.
 - `timbre.database_failed` (error): the database could not be opened,
   protected or migrated; the `code` is the original failure's own — never
   relabeled as `sqlite.open_failed` — with its `message` and `reason`.
-- `timbre.help` (info): one line of the command list; `text`.
+- `timbre.data_dir_permissive` (warn): the data directory was already
+  there and other users may read it; `path`, `mode`. Unix only.
 - `timbre.command_failed` (error): a command failed with a failure nobody
   logged yet; `code`, `message`.
 - `timbre.usage` (error): the command line is unusable; `reason`. Exit 2.
-- `timbre.db_check` (info/error): the integrity check ran; `ok`, and on
-  failure the check's `code`.
-- `timbre.db_backup` (info): the backup completed; `to`.
-- `timbre.db_prune` (info): tables no registered module owns; `tables`,
-  `dropped` (true only with `--yes`).
+- `timbre.db_check` (error): the integrity check failed; `ok=false` and the
+  check's `code`. Successful `db` results go to stdout outside the log filter.
 
 ## Failures
 
@@ -77,6 +79,8 @@ Publishes `signals::Started`.
 - `timbre.usage` (`TimbreFailure::Usage`): a usage error the `db` handlers
   raised after their own `timbre.usage` line; the exit is 2 and no second
   line belongs to it.
+- `kernel.usage` (`KernelFailure::Usage`): a module command's argument error;
+  also reports `timbre.usage` and exits 2.
 - `timbre.reported` (`TimbreFailure::Reported`): an outcome whose
   explanatory line the raising code already logged (a failed `db check`,
   a remembered database-open failure); the exit is 1 without a second

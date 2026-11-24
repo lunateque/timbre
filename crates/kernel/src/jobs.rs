@@ -6,12 +6,72 @@ use crate::failures::KernelFailure;
 use crate::future::BoxFuture;
 use crate::log::LogEvent;
 use crate::log_events::{JOB_FAILED, JOB_FINISHED, JOB_STARTED};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::future::poll_fn;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// The handler shape of a job: runs until the future it returns completes.
 pub type JobHandler = fn(Ctx) -> BoxFuture<Fallible>;
+
+/// Run blocking work after `first_delay` (zero means immediately), then
+/// after each `interval`, until the server stops. On shutdown the current
+/// pass is awaited. A pass failure is logged rather than ending the job: a
+/// briefly busy database must not disable the loop.
+///
+/// # Errors
+/// Returns a failure if the blocking worker panics.
+pub async fn run_periodic(
+    ctx: &Ctx,
+    first_delay: Duration,
+    interval: Duration,
+    failed: LogEvent,
+    work: fn(&Ctx) -> Fallible,
+) -> Fallible {
+    let stopped = Arc::new(AtomicBool::new(false));
+    let in_worker = Arc::clone(&stopped);
+    let worker = ctx.clone();
+    let mut blocking = ctx.blocking(move || {
+        let pass = || {
+            if let Err(failure) = work(&worker) {
+                crate::log!(worker, warn, failed, code = failure.code().as_str());
+            }
+        };
+        if first_delay.is_zero() || sleep(first_delay, &in_worker) {
+            pass();
+            while sleep(interval, &in_worker) {
+                pass();
+            }
+        }
+    });
+    let mut shutdown = Some(ctx.shutdown());
+    poll_fn(move |cx| {
+        if shutdown
+            .as_mut()
+            .is_some_and(|signal| signal.as_mut().poll(cx).is_ready())
+        {
+            stopped.store(true, Ordering::Release);
+            shutdown = None;
+        }
+        blocking.as_mut().poll(cx)
+    })
+    .await
+}
+
+fn sleep(duration: Duration, stopped: &AtomicBool) -> bool {
+    // The runtime has no timer. Short sleeps bound the shutdown delay.
+    const SLICE: Duration = Duration::from_millis(100);
+    let mut left = duration;
+    while !left.is_zero() {
+        if stopped.load(Ordering::Acquire) {
+            return false;
+        }
+        let slice = left.min(SLICE);
+        std::thread::sleep(slice);
+        left -= slice;
+    }
+    !stopped.load(Ordering::Acquire)
+}
 
 struct Entry {
     name: LogEvent,

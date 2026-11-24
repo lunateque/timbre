@@ -237,7 +237,7 @@ fn write_track(sql: &Connection, path: &Path, item: &Imported) -> Fallible<i64> 
     });
     let credit = crate::credits::display(fields.artist.as_ref(), &fields.artists);
     let order = order_name(fields.title_sort.as_deref().unwrap_or(&title));
-    let created = crate::store::unix_millis(std::time::SystemTime::now());
+    let created = timbre_kernel::clock::now_unix_millis();
     let art = item.tags.art.as_ref();
     if let Some(art) = art {
         art.art.write(sql)?;

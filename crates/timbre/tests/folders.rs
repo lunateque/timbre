@@ -65,7 +65,7 @@ fn assert_no_tree(ctx: &Ctx, folders: &dyn Folders) {
     );
     assert_eq!(
         folders
-            .directory(ctx, "42", None, ALL)
+            .folder(ctx, "42", None, ALL)
             .unwrap_err()
             .code()
             .as_str(),
@@ -143,6 +143,7 @@ mod with_library {
             Arc::new(ThreadRuntime::new()),
             resources,
         );
+        kernel.check_config().unwrap();
         let ctx = Ctx::root(&kernel);
         let Some(folders) = ctx.ports().get::<dyn Folders>() else {
             return;
@@ -182,7 +183,7 @@ mod with_library {
         let Versioned::Changed {
             value: dir,
             version: dir_version,
-        } = folders.directory(&ctx, &initial.id, None, first).unwrap()
+        } = folders.folder(&ctx, &initial.id, None, first).unwrap()
         else {
             panic!("expected initial directory")
         };
@@ -195,7 +196,7 @@ mod with_library {
             cursor: dir.children.next.as_ref(),
         };
         let Versioned::Changed { value: dir, .. } =
-            folders.directory(&ctx, &initial.id, None, next).unwrap()
+            folders.folder(&ctx, &initial.id, None, next).unwrap()
         else {
             panic!("expected continuation")
         };
@@ -204,7 +205,7 @@ mod with_library {
         );
         assert_eq!(
             folders
-                .directory(&ctx, &initial.id, Some(version), ALL)
+                .folder(&ctx, &initial.id, Some(version), ALL)
                 .unwrap(),
             Versioned::NotModified
         );
@@ -212,7 +213,7 @@ mod with_library {
         let ignored = folder_at(&ctx, &tree, &["Beta", "Deep"]);
         assert_eq!(
             folders
-                .directory(&ctx, &ignored.id, None, ALL)
+                .folder(&ctx, &ignored.id, None, ALL)
                 .unwrap_err()
                 .code()
                 .as_str(),
@@ -224,7 +225,7 @@ mod with_library {
             value: renamed,
             version: changed,
         } = folders
-            .directory(&ctx, &initial.id, Some(version), ALL)
+            .folder(&ctx, &initial.id, Some(version), ALL)
             .unwrap()
         else {
             panic!("rename must change the version")

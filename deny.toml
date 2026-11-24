@@ -19,6 +19,7 @@ exceptions = [
     { crate = "inotify-sys", allow = ["ISC"] },
     { crate = "notify", allow = ["CC0-1.0"] },
     { crate = "xxhash-rust", allow = ["BSL-1.0"] },
+    { crate = "subtle", allow = ["BSD-3-Clause"] },
 ]
 
 [licenses.private]

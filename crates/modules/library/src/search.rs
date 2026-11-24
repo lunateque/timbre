@@ -1,8 +1,8 @@
-use crate::store::{Window, all, exec};
+use crate::store::{all, exec};
 use timbre_edge_sqlite::rusqlite::{Connection, params};
 use timbre_edge_text::{contains_cjk, fold};
-use timbre_kernel::catalog::{SearchResults, SearchWindow, SearchWindows};
-use timbre_kernel::{Fallible, Page};
+use timbre_kernel::catalog::SearchResults;
+use timbre_kernel::{Fallible, Page, page::Window};
 
 /// One searchable kind. The row id of a search entry is derived from the
 /// entity id and this code, so one entity's row can be replaced or dropped
@@ -112,7 +112,7 @@ pub(crate) fn forget(sql: &Connection, entity: Entity, ids: &[i64]) -> Fallible 
 pub(crate) fn find(
     sql: &Connection,
     input: &str,
-    counts: SearchWindows,
+    [artists, albums, tracks]: [Window; 3],
 ) -> Fallible<SearchResults> {
     let folded = fold(input);
     let pattern = if input.trim().is_empty() {
@@ -131,15 +131,9 @@ pub(crate) fn find(
         Pattern::Prefix(format!("{}*", quoted(&folded)))
     };
     Ok(SearchResults {
-        artists: matching(
-            sql,
-            &pattern,
-            "artist",
-            counts.artists,
-            crate::views::artist,
-        )?,
-        albums: matching(sql, &pattern, "album", counts.albums, crate::views::album)?,
-        tracks: matching(sql, &pattern, "track", counts.tracks, crate::views::track)?,
+        artists: matching(sql, &pattern, "artist", artists, crate::views::artist)?,
+        albums: matching(sql, &pattern, "album", albums, crate::views::album)?,
+        tracks: matching(sql, &pattern, "track", tracks, crate::views::track)?,
     })
 }
 
@@ -159,14 +153,10 @@ fn matching<T>(
     sql: &Connection,
     pattern: &Pattern,
     kind: &str,
-    page: SearchWindow,
+    window: Window,
     hydrate: impl Fn(&Connection, i64) -> Fallible<T>,
 ) -> Fallible<Page<T>> {
-    let window = Window {
-        count: page.count,
-        offset: page.offset,
-    };
-    if page.count == 0 || matches!(pattern, Pattern::None) {
+    if window.count() == 0 || matches!(pattern, Pattern::None) {
         return Ok(window.page(Vec::new()));
     }
     let table = match kind {
@@ -219,21 +209,16 @@ fn fts(
 
 pub(crate) fn hydrate_page<T>(
     sql: &Connection,
-    mut ids: Vec<i64>,
+    ids: Vec<i64>,
     window: Window,
     hydrate: impl Fn(&Connection, i64) -> Fallible<T>,
 ) -> Fallible<Page<T>> {
-    let extra = ids.len() > window.count;
-    ids.truncate(window.count);
-    let mut page = window.page(
-        ids.into_iter()
+    let Page { items, next } = window.page(ids);
+    Ok(Page {
+        items: items
+            .into_iter()
             .map(|id| hydrate(sql, id))
             .collect::<Fallible<Vec<_>>>()?,
-    );
-    if extra && window.count != 0 {
-        page.next = Some(timbre_kernel::Cursor::new(
-            window.offset.saturating_add(window.count).to_string(),
-        ));
-    }
-    Ok(page)
+        next,
+    })
 }
