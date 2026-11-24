@@ -4,6 +4,8 @@ use crate::failure::{Failure, FailureCode};
 
 /// A port was provided twice.
 pub const PORT_TAKEN: FailureCode = FailureCode::new("kernel.port_taken");
+/// The host installed the same resource type twice.
+pub const RESOURCE_TAKEN: FailureCode = FailureCode::new("kernel.resource_taken");
 /// The log filter string could not be parsed.
 pub const LOG_FILTER_INVALID: FailureCode = FailureCode::new("kernel.log_filter_invalid");
 /// A route pattern is malformed.
@@ -36,6 +38,11 @@ pub enum KernelFailure {
     PortTaken {
         /// The type name of the port that was provided twice.
         port: &'static str,
+    },
+    /// Two host resources have the same concrete type.
+    ResourceTaken {
+        /// Type that was installed twice.
+        resource: &'static str,
     },
     /// The `TIMBRE_LOG` (or config) filter string is malformed.
     LogFilterInvalid,
@@ -109,6 +116,7 @@ impl Failure for KernelFailure {
     fn code(&self) -> FailureCode {
         match self {
             Self::PortTaken { .. } => PORT_TAKEN,
+            Self::ResourceTaken { .. } => RESOURCE_TAKEN,
             Self::LogFilterInvalid => LOG_FILTER_INVALID,
             Self::RouteInvalid { .. } => ROUTE_INVALID,
             Self::RouteTaken { .. } => ROUTE_TAKEN,
@@ -134,6 +142,7 @@ impl Failure for KernelFailure {
         match self {
             Self::BlockingPanicked => "The server failed to finish a background task.",
             Self::PortTaken { .. }
+            | Self::ResourceTaken { .. }
             | Self::LogFilterInvalid
             | Self::RouteInvalid { .. }
             | Self::RouteTaken { .. }

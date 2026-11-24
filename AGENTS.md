@@ -73,9 +73,10 @@ whole workspace is kept honest by one command: `just ci`.
 
 - `fuzz/` is a cargo-fuzz crate outside the workspace (own lockfile, own
   nightly pin); the stable gate never builds its `#![no_main]` bins.
-- Targets drive the real parsers through the edge crates' `fuzzing` feature
-  and assert the contracts (round trips, differentials), never "does not
-  panic". Add a target by following `fuzz/AGENTS.md`.
+- Targets drive the real parsers through the `fuzzing` feature of an edge
+  crate or a module (for example `timbre-library`'s LRC parser) and assert
+  the contracts (round trips, differentials), never "does not panic". Add a
+  target by following `fuzz/AGENTS.md`.
 - `just fuzz <target> [seconds]` runs one target locally (nightly + clang);
   `.github/workflows/fuzz.yml` runs every target nightly.
 - Every crash becomes a regression test: `cargo fuzz tmin` shrinks it, the

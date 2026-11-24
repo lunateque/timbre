@@ -1,0 +1,17 @@
+[package]
+name = "timbre-edge-fswatch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+fuzzing = []
+
+[dependencies]
+notify.workspace = true
+timbre-kernel.workspace = true
+
+[lints]
+workspace = true

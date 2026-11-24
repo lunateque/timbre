@@ -17,11 +17,17 @@
 pub mod config;
 pub mod http;
 pub mod identity;
+pub mod image;
 pub mod log_filter;
+pub mod lyrics;
 pub mod proxy;
+pub mod tags;
 
 pub use config::config;
 pub use http::{form_roundtrip, http_head};
 pub use identity::identity;
+pub use image::image_thumbnail;
 pub use log_filter::log_filter;
+pub use lyrics::lrc_parse;
 pub use proxy::proxy;
+pub use tags::tags_read;

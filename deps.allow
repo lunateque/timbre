@@ -2,8 +2,8 @@
 # Transitive crates are not listed here; deny.toml gates them by licenses, bans, sources, advisories.
 # Only crates under crates/edge/ and xtask may depend on the crates listed here.
 ra-ap-rustc_lexer the lexer of rustc itself, so xtask reads Rust source exactly as the compiler does
-serde_json reads the cargo metadata output in xtask
-serde the derive backend every edge config struct deserializes with
+serde_json reads cargo metadata in xtask and encodes typed catalog values for SQLite
+serde derives edge configuration and persisted native tag data
 toml the config file format: it keeps a value tree, so environment overrides merge before deserialization
 tokio the multi-thread executor behind the serving runtime, its timers and its signals
 hyper the HTTP/1.1 and HTTP/2 server implementation edge/http drives
@@ -16,3 +16,11 @@ form_urlencoded decodes application/x-www-form-urlencoded POST bodies into query
 percent-encoding decodes percent-escapes in request paths
 rusqlite SQLite bindings with the bundled C sources: the only store edge/sqlite speaks
 socket2 reading the accepted socket past tokio's API to arm TCP keepalive on served connections
+lofty reads audio properties and native metadata across the supported containers
+xxhash-rust hashes audio fingerprint windows, library folder signatures and artwork with XXH3-128
+image decodes JPEG, PNG and WebP and encodes JPEG art thumbnails
+fast_image_resize resizes art thumbnails with the Lanczos3 filter
+notify applies native filesystem notifications across platforms
+icu_normalizer canonically decomposes Unicode for search
+icu_casemap applies the full Unicode case fold
+icu_properties identifies combining marks, punctuation and CJK scripts

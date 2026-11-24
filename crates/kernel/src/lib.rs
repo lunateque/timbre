@@ -31,21 +31,26 @@
 
 #![warn(missing_docs)]
 
+pub mod artwork;
 mod bus;
+pub mod catalog;
 pub mod command;
 pub mod credential;
 mod ctx;
 mod failure;
+pub mod folders;
 mod future;
 pub mod guard;
 pub mod identity;
 mod jobs;
+pub mod library_tree;
 mod log;
 pub mod migration;
 mod names;
 pub mod page;
 mod port;
 mod registry;
+mod resources;
 pub mod route;
 mod runtime;
 mod secret;
@@ -72,9 +77,10 @@ pub use identity::{Identity, Permission, PermissionEntry, Principal, UserId, Use
 pub use jobs::JobHandler;
 pub use log::{Clock, Format, Level, LogEvent, LogFilter, LogValue, Logger, Value};
 pub use migration::Migration;
-pub use page::{Cursor, Page};
+pub use page::{Cursor, MAX_PAGE_LIMIT, Page, PageRequest};
 pub use port::{Port, Ports};
 pub use registry::{Kernel, Registry};
+pub use resources::Resources;
 pub use route::{Matched, RouteHandler, RouteMatch};
 pub use runtime::{Runtime, ThreadRuntime};
 pub use secret::{REDACTED, Secret};

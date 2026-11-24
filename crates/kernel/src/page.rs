@@ -1,5 +1,11 @@
 //! Ordered result pages: the shape every port between modules returns.
 
+/// The largest page a port method serves. A larger `limit` (or search
+/// `count`) is refused with the provider's own argument failure instead of
+/// being silently clamped, so a caller never mistakes a short page for the
+/// end of a list.
+pub const MAX_PAGE_LIMIT: usize = 500;
+
 /// An opaque continuation token; only the port that issued it reads it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cursor(String);
@@ -27,4 +33,13 @@ pub struct Page<T> {
     pub items: Vec<T>,
     /// The cursor asking for the following page, `None` at the end.
     pub next: Option<Cursor>,
+}
+
+/// Request the first page or continue from a cursor returned by the same list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PageRequest<'a> {
+    /// Maximum number of items to return, at most [`MAX_PAGE_LIMIT`].
+    pub limit: usize,
+    /// `None` on the first request.
+    pub cursor: Option<&'a Cursor>,
 }

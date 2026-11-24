@@ -7,11 +7,19 @@
 all-features = true
 
 [advisories]
-ignore = []
+# `paste` is a proc-macro with no runtime surface and no CVE; it is archived,
+# and lofty 0.25.5 (pinned by the library ADR) is its only path into the tree.
+ignore = [{ id = "RUSTSEC-2024-0436", reason = "unmaintained proc-macro pulled in by lofty" }]
 
 [licenses]
 # Zlib enters through foldhash (hashbrown -> hashlink, rusqlite; indexmap, h2).
 allow = ["MIT", "Apache-2.0", "Unicode-3.0", "Zlib"]
+exceptions = [
+    { crate = "inotify", allow = ["ISC"] },
+    { crate = "inotify-sys", allow = ["ISC"] },
+    { crate = "notify", allow = ["CC0-1.0"] },
+    { crate = "xxhash-rust", allow = ["BSL-1.0"] },
+]
 
 [licenses.private]
 ignore = true
@@ -22,6 +30,8 @@ wildcards = "deny"
 # Workspace members are private path dependencies without version reqs;
 # wildcards stay denied for registry crates.
 allow-wildcard-paths = true
+# png requires miniz 0.8 while Lofty's required flate2 uses miniz 0.9.
+skip = [{ crate = "miniz_oxide@0.8.9" }]
 
 [sources]
 unknown-registry = "deny"

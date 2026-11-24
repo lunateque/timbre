@@ -41,11 +41,20 @@ plus the `AccessDenied` signal.
 
 ## Ports
 
-None implemented. The kernel defines the `Port` trait and the `Ports`
-registry; consumers must tolerate a port's absence. The `Throttle`
-(brute-force limiting of credential checks) is deliberately not a port:
+`Catalog`, `Artwork`, `LibraryTree` and `Folders` describe the music catalog,
+art, scanned directory tree and visible folder browsing respectively.
+Consumers must tolerate a port's absence. The host
+installs shared runtime resources at `Registry::finish_with_resources`;
+modules can read them with `Ctx::resource` but cannot register resources.
+The `Throttle` (brute-force limiting of credential checks) is deliberately not a port:
 exactly one may exist and only the kernel calls it, so it registers through
 `Registry::throttle`; its absence means no in-process limiting.
+
+Every list method pages with a `Cursor` and serves at most
+`page::MAX_PAGE_LIMIT` (500) items; a larger `limit` is refused by the
+provider, never silently clamped. `Catalog::search` is the single exception to
+cursor paging: it takes a count and an offset per category, because one
+`search3` call asks for three independent windows at once.
 
 ## Test support
 
@@ -68,6 +77,8 @@ request: client, canonical user, required permission).
 
 - `kernel.port_taken` (`KernelFailure::PortTaken`): a port already provided was
   provided again.
+- `kernel.resource_taken` (`KernelFailure::ResourceTaken`): the host
+  installed two runtime resources of the same concrete type.
 - `kernel.log_filter_invalid` (`KernelFailure::LogFilterInvalid`): a
   `TIMBRE_LOG`-style filter specification did not parse.
 - `kernel.route_invalid` / `kernel.route_taken` (`KernelFailure::RouteInvalid`

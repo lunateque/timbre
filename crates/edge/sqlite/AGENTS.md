@@ -6,7 +6,9 @@ The only place SQLite is spoken: `Database::open` (WAL, 5 s busy timeout,
 foreign keys on, the database file and its `-wal`/`-shm` sidecars mode 0600
 on Unix, and on Unix a database file owned by a different user is refused
 by `sqlite.open_failed` rather than trusted), one writer connection behind
-a mutex and a pool of reader connections, blocking `write`/`read` calls for
+a mutex and a pool of reader connections opened `SQLITE_OPEN_READ_ONLY`
+(a query cannot change stored data, whatever it says), blocking
+`write`/`read` calls for
 `Ctx::blocking`, a 30 s progress-handler cap on any single statement —
 the watchdog is per statement, not per transaction: a transaction may run
 many statements, and each one individually gets the 30 s; a transaction
@@ -28,6 +30,11 @@ open, not written through) and deletes the partial file when
 the copy fails) and `owned_tables`/`drop_tables` (what `timbre db prune`
 lists and drops; a table belongs to the registered module with the longest
 `<module>_` prefix of its name).
+
+`SharedDatabase` opens and migrates the host's one database on first use,
+one caller at a time, the others waiting at most 5 s before `sqlite.busy`.
+A failed attempt is reported to its caller only and never remembered: the
+next `get` prepares, opens and migrates again.
 
 ## Ports
 
@@ -52,9 +59,11 @@ None.
   destination refused, named the live database, or failed.
 - `sqlite.query_failed` (`SqliteFailure::Query`): a statement or transaction
   failed.
+- `sqlite.json_failed` (`SqliteFailure::Json`): a JSON column could not be
+  encoded, or a stored one has the wrong shape.
 - `sqlite.busy` (`SqliteFailure::Busy`): no reader connection was free for
-  the whole 5 s lease wait, or the writer stayed held for the whole 5 s
-  gate wait.
+  the whole 5 s lease wait, the writer stayed held for the whole 5 s gate
+  wait, or another caller's `SharedDatabase` open did not finish in 5 s.
 - `sqlite.query_timeout` (`SqliteFailure::QueryTimeout`): one statement ran
   past the per-statement watchdog and was interrupted.
 - `sqlite.migration_failed` (`SqliteFailure::Migration`): a migration step

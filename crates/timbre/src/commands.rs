@@ -7,46 +7,9 @@
 use crate::db;
 use crate::failures::TimbreFailure;
 use crate::log_events::{DATABASE_FAILED, HELP, STARTED, STOPPED};
-use crate::open_database;
-use std::sync::OnceLock;
+use timbre_edge_sqlite::{Database, SharedDatabase};
 use timbre_kernel::signals::Started;
 use timbre_kernel::{BoxFuture, Ctx, Failure, Fallible, Kernel, Registry, log};
-
-/// What the handlers need beyond their `Ctx`: the loaded config (both paths
-/// read `[server]`), the HTTP settings the serve path built before it
-/// started serving, and the database, opened and migrated once on first use
-/// and shared by every later command of the run. The config is runtime
-/// input, which is why this is a `OnceLock` set from `main` rather than a
-/// `LazyLock`.
-struct App {
-    config: timbre_edge_config::Config,
-    http: OnceLock<timbre_edge_http::HttpConfig>,
-    database: OnceLock<Result<timbre_edge_sqlite::Database, FailedDatabase>>,
-}
-
-/// A remembered open failure: its code is already on the log under
-/// `timbre.database_failed`; the command exits on it without a second line.
-struct FailedDatabase;
-
-static APP: OnceLock<App> = OnceLock::new();
-
-/// Install the configuration the built-in handlers read; called once from
-/// `main` before any dispatch, on both the serve and the command path.
-pub(crate) fn install(config: timbre_edge_config::Config) {
-    let _ = APP.set(App {
-        config,
-        http: OnceLock::new(),
-        database: OnceLock::new(),
-    });
-}
-
-/// Hand the serving settings to the table's `serve` handler; only the serve
-/// path sets them, and it sets them before dispatching.
-pub(crate) fn set_http(http: timbre_edge_http::HttpConfig) {
-    if let Some(app) = APP.get() {
-        let _ = app.http.set(http);
-    }
-}
 
 /// Register every built-in command on `registry`, after the modules: a
 /// module that already took one of these names fails registration rather
@@ -106,57 +69,38 @@ pub(crate) fn classify(outcome: Fallible) -> Outcome {
 
 /// The dispatcher: the kernel's table is consulted and only it. No argument
 /// matches: the help list prints and the run ends with `timbre.usage`
-/// (exit 2). Every command but `help` starts from an open, migrated
-/// database, exactly as `serve` does.
+/// (exit 2). A command accesses the shared database only when it needs it.
 ///
 /// # Errors
 ///
-/// Propagates the handler's failure; an unknown command is `timbre.usage`,
-/// a failed database open is `timbre.reported` after its own line.
+/// Propagates the handler's failure; an unknown command is `timbre.usage`.
 pub(crate) async fn dispatch(ctx: &Ctx, kernel: &Kernel, args: &[String]) -> Fallible {
     let Some((handler, rest)) = kernel.find_command(args) else {
         help_list(ctx, kernel);
         return Err(Box::new(TimbreFailure::Usage) as Box<dyn Failure>);
     };
-    // `help` answers from the table alone; everything else needs the data
-    // directory and the database migrated underneath it.
-    if args.first().is_none_or(|first| first != "help") {
-        opened_database(ctx)?;
-    }
     handler(ctx.clone(), rest).await
 }
 
-/// The database, opened and migrated once per process; the first failure
-/// logs one `timbre.database_failed` line carrying the code of the original
-/// failure (never a relabeled one), and every later caller exits on the
-/// remembered fact without a second line.
-fn opened_database(ctx: &Ctx) -> Fallible<&'static timbre_edge_sqlite::Database> {
-    let Some(app) = APP.get() else {
-        // Only reachable if `main` dispatched before installing the config:
-        // a programming error, not the operator's.
-        return Err(Box::new(TimbreFailure::DataDir {
-            reason: "no configuration was installed for this run".to_owned(),
-        }) as Box<dyn Failure>);
-    };
-    let outcome =
-        app.database
-            .get_or_init(|| match open_database(ctx.kernel(), &app.config, ctx) {
-                Ok(database) => Ok(database),
-                Err(failure) => {
-                    log!(
-                        ctx,
-                        error,
-                        DATABASE_FAILED,
-                        code = failure.code().as_str(),
-                        message = failure.public_message(),
-                        reason = format!("{failure:?}").as_str()
-                    );
-                    Err(FailedDatabase)
-                }
-            });
-    match outcome {
-        Ok(database) => Ok(database),
-        Err(FailedDatabase) => Err(Box::new(TimbreFailure::Reported) as Box<dyn Failure>),
+fn with_database<T>(ctx: &Ctx, read: impl FnOnce(&Database) -> Fallible<T>) -> Fallible<T> {
+    let shared = ctx.resource::<SharedDatabase>().ok_or_else(|| {
+        Box::new(TimbreFailure::DataDir {
+            reason: "no database was installed for this run".to_owned(),
+        }) as Box<dyn Failure>
+    })?;
+    match shared.get(ctx) {
+        Ok(database) => read(database),
+        Err(failure) => {
+            log!(
+                ctx,
+                error,
+                DATABASE_FAILED,
+                code = failure.code().as_str(),
+                message = failure.public_message(),
+                reason = format!("{failure:?}").as_str()
+            );
+            Err(Box::new(TimbreFailure::Reported))
+        }
     }
 }
 
@@ -167,15 +111,15 @@ fn opened_database(ctx: &Ctx) -> Fallible<&'static timbre_edge_sqlite::Database>
 /// serve attempt on the CLI runtime.
 fn serve(ctx: Ctx, _rest: Vec<String>) -> BoxFuture<Fallible> {
     Box::pin(async move {
-        let http = APP
-            .get()
-            .and_then(|app| app.http.get())
+        let http = ctx
+            .resource::<timbre_edge_http::HttpConfig>()
             .ok_or_else(|| Box::new(TimbreFailure::Runtime) as Box<dyn Failure>)?;
+        with_database(&ctx, |_| Ok(()))?;
         let listen = http.listen.join(",");
         log!(ctx, info, STARTED, listen = listen.as_str());
         ctx.publish(&Started);
         ctx.kernel().start_jobs(&ctx);
-        let outcome = timbre_edge_http::serve(ctx.clone(), http.clone()).await;
+        let outcome = timbre_edge_http::serve(ctx.clone(), (*http).clone()).await;
         // The server stopped accepting and drained. A drain that expired
         // with responses still in flight is noticed only inside `edge/http`
         // -- `serve` reports it neither in its result nor through a port --
@@ -199,15 +143,19 @@ fn db_command(ctx: Ctx, rest: Vec<String>) -> BoxFuture<Fallible> {
 }
 
 fn db_check(ctx: Ctx, rest: Vec<String>) -> BoxFuture<Fallible> {
-    Box::pin(async move { db::check(&ctx, opened_database(&ctx)?, &rest) })
+    Box::pin(async move { with_database(&ctx, |database| db::check(&ctx, database, &rest)) })
 }
 
 fn db_backup(ctx: Ctx, rest: Vec<String>) -> BoxFuture<Fallible> {
-    Box::pin(async move { db::backup(&ctx, opened_database(&ctx)?, &rest) })
+    Box::pin(async move { with_database(&ctx, |database| db::backup(&ctx, database, &rest)) })
 }
 
 fn db_prune(ctx: Ctx, rest: Vec<String>) -> BoxFuture<Fallible> {
-    Box::pin(async move { db::prune(&ctx, ctx.kernel(), opened_database(&ctx)?, &rest) })
+    Box::pin(async move {
+        with_database(&ctx, |database| {
+            db::prune(&ctx, ctx.kernel(), database, &rest)
+        })
+    })
 }
 
 /// The usage line plus one `timbre.help` line per registered command.

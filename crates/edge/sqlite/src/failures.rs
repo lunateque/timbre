@@ -12,6 +12,8 @@ pub const MIGRATION_FAILED: FailureCode = FailureCode::new("sqlite.migration_fai
 pub const BUSY: FailureCode = FailureCode::new("sqlite.busy");
 /// A single statement ran past the statement timeout and was interrupted.
 pub const QUERY_TIMEOUT: FailureCode = FailureCode::new("sqlite.query_timeout");
+/// A JSON column could not be encoded or decoded.
+pub const JSON_FAILED: FailureCode = FailureCode::new("sqlite.json_failed");
 
 /// Failures raised while storing data.
 #[derive(Debug)]
@@ -24,6 +26,11 @@ pub enum SqliteFailure {
     /// `reason` is SQLite's own description.
     Query {
         /// The message of the failed statement.
+        reason: String,
+    },
+    /// `reason` is serde's own description of the JSON column's contents.
+    Json {
+        /// What went wrong, for the log only.
         reason: String,
     },
     /// No reader connection was free for the whole lease timeout.
@@ -49,6 +56,7 @@ impl Failure for SqliteFailure {
             Self::Migration { .. } => MIGRATION_FAILED,
             Self::Busy => BUSY,
             Self::QueryTimeout => QUERY_TIMEOUT,
+            Self::Json { .. } => JSON_FAILED,
         }
     }
 
@@ -60,14 +68,16 @@ impl Failure for SqliteFailure {
         match self {
             Self::Busy => 503,
             Self::QueryTimeout => 504,
-            Self::Open { .. } | Self::Query { .. } | Self::Migration { .. } => 500,
+            Self::Open { .. } | Self::Query { .. } | Self::Json { .. } | Self::Migration { .. } => {
+                500
+            }
         }
     }
 
     fn public_message(&self) -> &str {
         match self {
             Self::Open { .. } | Self::Migration { .. } => "The server failed to start.",
-            Self::Query { .. } | Self::Busy | Self::QueryTimeout => {
+            Self::Query { .. } | Self::Json { .. } | Self::Busy | Self::QueryTimeout => {
                 "The server could not complete the request."
             }
         }
@@ -81,7 +91,7 @@ impl Failure for SqliteFailure {
     clippy::needless_pass_by_value,
     reason = "used as a map_err callback, which passes the error by value"
 )]
-pub(crate) fn query_error(error: rusqlite::Error) -> Box<dyn timbre_kernel::Failure> {
+pub fn query_error(error: rusqlite::Error) -> Box<dyn timbre_kernel::Failure> {
     // The only source of `SQLITE_INTERRUPT` on these connections is the
     // statement watchdog installed by `Database::open_with`, so an
     // interrupted statement is a timeout, not someone else's cancel.

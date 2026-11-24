@@ -14,8 +14,13 @@ mod database;
 pub mod failures;
 mod files;
 mod gate;
+pub mod json;
 pub mod log_events;
 mod migrate;
 mod pool;
+mod shared;
+mod tables;
 
 pub use database::Database;
+pub use rusqlite;
+pub use shared::SharedDatabase;

@@ -4,9 +4,9 @@
 //! Every command shares one startup: config (argument, `TIMBRE_CONFIG`,
 //! `./timbre.toml`), log filter (`TIMBRE_LOG` wins over `[log].filter`), the
 //! registry with every module and the binary's own built-in commands
-//! (`commands.rs`: `serve`, `help`, `db ...`), the kernel, and the migrated
-//! database. `serve` runs on tokio; CLI commands on the kernel's own
-//! `ThreadRuntime`. `help` is answered without the database.
+//! (`commands.rs`: `serve`, `help`, `db ...`), and the kernel. `serve` runs
+//! on tokio; CLI commands on the kernel's `ThreadRuntime`. Commands that
+//! need the database share lazy open and migration; help never opens it.
 
 mod commands;
 mod db;
@@ -20,8 +20,9 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 use timbre_edge_config::{Config, LogSection, ServerSection};
+use timbre_edge_sqlite::SharedDatabase;
 use timbre_kernel::{
-    Ctx, Failure, FailureCode, Fallible, Kernel, LogEvent, LogFilter, Logger, Registry,
+    Ctx, Failure, FailureCode, Fallible, LogEvent, LogFilter, Logger, Registry, Resources,
     ThreadRuntime, log,
 };
 
@@ -71,11 +72,10 @@ fn main() -> ExitCode {
     if let Err(failure) = commands::register(&mut registry) {
         return fatal(&REGISTRATION_FAILED, &*failure);
     }
-    // The sections the startup itself reads: a malformed one stops the
-    // process with `config.invalid`, never silently falls back to defaults.
-    if let Err(failure) = validate_sections(&config) {
-        return fatal(&CONFIG_FAILED, &*failure);
-    }
+    let resources = match runtime_resources(config) {
+        Ok(resources) => resources,
+        Err(failure) => return fatal(&CONFIG_FAILED, &*failure),
+    };
     let logger = Logger::new(
         filter,
         if std::io::stdout().is_terminal() {
@@ -89,7 +89,7 @@ fn main() -> ExitCode {
     let serving = args.first().is_some_and(|first| first == "serve");
     let outcome: Fallible<ExitCode> = if serving {
         match timbre_edge_runtime::TokioRuntime::block_on(serve_with(
-            registry, logger, &args, config,
+            registry, logger, &args, resources,
         )) {
             Ok(outcome) => outcome,
             // The executor itself could not start: no future ran, so the
@@ -97,8 +97,8 @@ fn main() -> ExitCode {
             Err(cause) => return fatal_runtime(&cause),
         }
     } else {
-        let kernel = registry.finish(logger, Arc::new(ThreadRuntime::new()));
-        commands::install(config);
+        let kernel =
+            registry.finish_with_resources(logger, Arc::new(ThreadRuntime::new()), resources);
         let ctx = Ctx::root(&kernel);
         // Command handlers are futures driven on this thread: that is what
         // the kernel's `block_on` is for, and why the command path finishes
@@ -127,16 +127,14 @@ async fn serve_with(
     registry: Registry,
     logger: Logger,
     args: &[String],
-    config: Config,
+    resources: Resources,
 ) -> Fallible<ExitCode> {
-    let http = http_config(&config)?;
     let runtime = timbre_edge_runtime::TokioRuntime::current();
-    let kernel = registry.finish(
+    let kernel = registry.finish_with_resources(
         logger,
         Arc::clone(&runtime) as Arc<dyn timbre_kernel::Runtime>,
+        resources,
     );
-    commands::install(config);
-    commands::set_http(http);
     let ctx = Ctx::root(&kernel);
     let dispatched = commands::dispatch(&ctx, &kernel, args).await;
     // Jobs get the spec's shutdown grace: up to ten seconds to finish their
@@ -160,66 +158,62 @@ async fn serve_with(
     }
 }
 
-/// Open (creating `[server].data_dir`, mode 700 on Unix) and migrate the
-/// database with every registered module's steps; the handle is returned so
-/// a command reuses this connection instead of opening the file again. A
-/// failed data-directory step is the binary's own `timbre.data_dir_failed`,
-/// never the edge's; an open or migration failure keeps the edge's code.
-///
-/// # Errors
-///
-/// `timbre.data_dir_failed`, or whatever the open or the migration returns.
-pub(crate) fn open_database(
-    kernel: &Kernel,
-    config: &Config,
-    ctx: &Ctx,
-) -> Fallible<timbre_edge_sqlite::Database> {
-    let path = database_path(config)?;
-    if let Some(parent) = path
+/// Create the directory the database lives in. A directory this process
+/// created is made private; one that was already there belongs to the
+/// operator, so a mode that lets other users in is reported and left alone
+/// rather than changed under them.
+fn prepare_data_dir(ctx: &Ctx, path: &Path) -> Fallible {
+    let Some(parent) = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(());
+    };
+    let fault = |error: &std::io::Error| {
+        Box::new(failures::TimbreFailure::DataDir {
+            reason: format!("{}: {error}", parent.display()),
+        }) as Box<dyn Failure>
+    };
+    let existed = parent.try_exists().map_err(|error| fault(&error))?;
+    std::fs::create_dir_all(parent).map_err(|error| fault(&error))?;
+    #[cfg(unix)]
     {
-        std::fs::create_dir_all(parent).map_err(|error| {
-            Box::new(failures::TimbreFailure::DataDir {
-                reason: format!("{}: {error}", parent.display()),
-            }) as Box<dyn Failure>
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            // A data dir the owner cannot keep private (mode 700 refused)
+        use std::os::unix::fs::PermissionsExt;
+        if existed {
+            let mode = std::fs::metadata(parent)
+                .map_err(|error| fault(&error))?
+                .permissions()
+                .mode();
+            if mode & 0o077 != 0 {
+                log!(
+                    ctx,
+                    warn,
+                    log_events::DATA_DIR_PERMISSIVE,
+                    path = parent.display().to_string(),
+                    mode = format!("{:04o}", mode & 0o7777),
+                );
+            }
+        } else {
+            // A data dir this process just created and cannot keep private
             // must stop startup: an ignored failure here silently exposes
             // the database to every local user.
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(
-                |error| {
-                    Box::new(failures::TimbreFailure::DataDir {
-                        reason: format!("{}: {error}", parent.display()),
-                    }) as Box<dyn Failure>
-                },
-            )?;
+            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| fault(&error))?;
         }
     }
-    let database = timbre_edge_sqlite::Database::open(&path)?;
-    database.migrate(ctx, kernel.migrations())?;
-    Ok(database)
-}
-
-fn database_path(config: &Config) -> Fallible<PathBuf> {
-    let section: ServerSection = config.section("server")?;
-    Ok(Path::new(&section.data_dir).join("timbre.db"))
-}
-
-fn http_config(config: &Config) -> Fallible<timbre_edge_http::HttpConfig> {
-    timbre_edge_http::HttpConfig::from_config(config)
-}
-
-/// Read every section the startup itself depends on (`[server]` and
-/// `[http]`), so a malformed one fails with `config.invalid` before any
-/// request is served; defaults still apply to keys absent from the file.
-fn validate_sections(config: &Config) -> Fallible {
-    let _: ServerSection = config.section("server")?;
-    let _http = http_config(config)?;
+    #[cfg(not(unix))]
+    let _ = (ctx, existed);
     Ok(())
+}
+
+fn runtime_resources(config: Config) -> Fallible<Resources> {
+    let section: ServerSection = config.section("server")?;
+    let path = Path::new(&section.data_dir).join("timbre.db");
+    let http = timbre_edge_http::HttpConfig::from_config(&config)?;
+    Resources::new()
+        .with(Arc::new(config))?
+        .with(Arc::new(http))?
+        .with(Arc::new(SharedDatabase::new(path, prepare_data_dir)))
 }
 
 /// The filter named by `TIMBRE_LOG`, else `[log].filter`, else the default;

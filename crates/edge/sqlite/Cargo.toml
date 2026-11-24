@@ -11,4 +11,6 @@ workspace = true
 
 [dependencies]
 rusqlite = { workspace = true, features = ["bundled", "backup", "hooks", "trace"] }
+serde.workspace = true
+serde_json.workspace = true
 timbre-kernel.workspace = true

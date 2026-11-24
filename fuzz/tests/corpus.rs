@@ -87,3 +87,18 @@ fn config_seeds_hold_their_invariants() {
 fn log_filter_seeds_hold_their_invariants() {
     replay("log_filter", timbre_fuzz::log_filter);
 }
+
+#[test]
+fn tags_read_seeds_hold_their_invariants() {
+    replay("tags_read", timbre_fuzz::tags_read);
+}
+
+#[test]
+fn image_thumbnail_seeds_hold_their_invariants() {
+    replay("image_thumbnail", timbre_fuzz::image_thumbnail);
+}
+
+#[test]
+fn lrc_parse_seeds_hold_their_invariants() {
+    replay("lrc_parse", timbre_fuzz::lrc_parse);
+}

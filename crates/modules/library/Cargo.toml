@@ -1,0 +1,30 @@
+[package]
+name = "timbre-library"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+fuzzing = []
+
+[[test]]
+name = "lrc"
+required-features = ["fuzzing"]
+
+[dependencies]
+timbre-kernel.workspace = true
+timbre-edge-config.workspace = true
+timbre-edge-sqlite.workspace = true
+timbre-edge-tags.workspace = true
+timbre-edge-image.workspace = true
+timbre-edge-fswatch.workspace = true
+timbre-edge-text.workspace = true
+
+[dev-dependencies]
+timbre-edge-tags = { workspace = true, features = ["fixtures"] }
+timbre-kernel = { workspace = true, features = ["testing"] }

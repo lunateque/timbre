@@ -78,3 +78,37 @@ fn a_long_statement_is_interrupted_by_the_watchdog() {
         .expect("the reader still serves");
     let _ = std::fs::remove_dir_all(path.parent().expect("the scratch dir"));
 }
+
+/// The data directory may be an operator-made directory with a loose mode,
+/// and the sidecars appear only on the first write: the database and both
+/// of them must still be unreadable to other local users.
+#[cfg(unix)]
+#[test]
+fn the_database_and_its_sidecars_are_owner_only_in_a_permissive_directory() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = scratch("modes");
+    let dir = path.parent().expect("the scratch dir").to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777))
+        .expect("the data directory is made world-writable");
+    let database = Database::open(&path).expect("a fresh database opens");
+    database
+        .write(|connection| {
+            batch(
+                connection,
+                "CREATE TABLE rows_here (id INTEGER PRIMARY KEY); INSERT INTO rows_here VALUES (1)",
+            )
+        })
+        .expect("the write runs");
+    for suffix in ["", "-wal", "-shm"] {
+        let file = crate::files::with_suffix(&path, suffix);
+        let mode = std::fs::metadata(&file)
+            .unwrap_or_else(|error| panic!("{} exists: {error}", file.display()))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "{} is mode {mode:o}", file.display());
+    }
+    drop(database);
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -17,6 +17,14 @@ pub(crate) const RUNTIME_FAILED: LogEvent = LogEvent::new("timbre.runtime_failed
 pub(crate) const CONFIG_FAILED: LogEvent = LogEvent::new("timbre.config_failed");
 /// The database could not be opened or migrated; startup stops.
 pub(crate) const DATABASE_FAILED: LogEvent = LogEvent::new("timbre.database_failed");
+/// A data directory that already existed is reachable beyond its owner;
+/// `path` names it and `mode` is its Unix mode. The binary leaves a
+/// directory it did not create alone, so this is a warning, not a failure.
+#[cfg_attr(
+    not(unix),
+    expect(dead_code, reason = "only unix reports directory permissions")
+)]
+pub(crate) const DATA_DIR_PERMISSIVE: LogEvent = LogEvent::new("timbre.data_dir_permissive");
 /// One line of `timbre help`: `name` and `help`.
 pub(crate) const HELP: LogEvent = LogEvent::new("timbre.help");
 /// A CLI handler returned a failure; the code names it.

@@ -1,6 +1,7 @@
 //! Registration: modules declare their handlers and ports on a `Registry`,
 //! which the binary finishes into the shared `Kernel`.
 
+use crate::Resources;
 use crate::bus::{Bus, Handler, Signal};
 use crate::command::{Command, CommandHandler, CommandTable};
 use crate::credential::{
@@ -24,6 +25,7 @@ pub struct Kernel {
     logger: Logger,
     runtime: Arc<dyn Runtime>,
     bus: Bus,
+    pub(crate) resources: Resources,
     ports: Ports,
     routes: RouteTable,
     jobs: JobTable,
@@ -338,11 +340,22 @@ impl Registry {
     /// not through a port: it is server infrastructure, and every consumer
     /// needs it, so removability does not apply.
     pub fn finish(self, logger: Logger, runtime: Arc<dyn Runtime>) -> Arc<Kernel> {
+        self.finish_with_resources(logger, runtime, Resources::new())
+    }
+
+    /// Freeze the registry with read-only, host-provided runtime resources.
+    pub fn finish_with_resources(
+        self,
+        logger: Logger,
+        runtime: Arc<dyn Runtime>,
+        resources: Resources,
+    ) -> Arc<Kernel> {
         Arc::new(Kernel {
             logger,
             runtime,
             bus: self.bus,
             ports: self.ports,
+            resources,
             routes: self.routes,
             jobs: self.jobs,
             running_jobs: JobTracker::new(),

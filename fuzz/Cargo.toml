@@ -33,7 +33,10 @@ fuzz-targets = ["dep:libfuzzer-sys"]
 form_urlencoded = "1.2.2"
 libfuzzer-sys = { version = "0.4.13", optional = true }
 timbre-edge-http = { path = "../crates/edge/http", features = ["fuzzing"] }
+timbre-edge-image = { path = "../crates/edge/image", features = ["fuzzing"] }
+timbre-edge-tags = { path = "../crates/edge/tags", features = ["fuzzing"] }
 timbre-kernel = { path = "../crates/kernel" }
+timbre-library = { path = "../crates/modules/library", features = ["fuzzing"] }
 
 # Each target is one parser family; a crash names the family it reached.
 [[bin]]
@@ -79,6 +82,30 @@ bench = false
 [[bin]]
 name = "config"
 path = "fuzz_targets/config.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tags_read"
+path = "fuzz_targets/tags_read.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "image_thumbnail"
+path = "fuzz_targets/image_thumbnail.rs"
+required-features = ["fuzz-targets"]
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lrc_parse"
+path = "fuzz_targets/lrc_parse.rs"
 required-features = ["fuzz-targets"]
 test = false
 doc = false

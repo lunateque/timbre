@@ -95,6 +95,11 @@ impl Ctx {
         self.kernel.ports()
     }
 
+    /// Read a concrete runtime resource installed by the host, if present.
+    pub fn resource<T: Send + Sync + 'static>(&self) -> Option<Arc<T>> {
+        self.kernel.resources.get()
+    }
+
     /// The kernel this context was built from: what the HTTP edge needs to
     /// reach the route table while owning only a context.
     #[must_use]

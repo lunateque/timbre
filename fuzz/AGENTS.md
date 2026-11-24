@@ -5,9 +5,9 @@
 The fuzzing harness: `cargo-fuzz` (libFuzzer, ADR 0003) targets over the
 real outside-facing parsers - request-target normalization, query and form
 decoding, header pair conversion, path parameter extraction, `X-Forwarded-For`
-resolution, `UserName::normalize` and the `[http]` config section. Every
-target drives the shipped code through the edge crates' `fuzzing` cargo
-feature (no copies: a parser change cannot silently leave the fuzzing
+resolution, `UserName::normalize`, the `[http]` config section, audio tags,
+bounded image thumbnails and enhanced LRC lyrics. Each target drives
+the shipped parser (no copies: a parser change cannot silently leave the fuzzing
 behind) and keeps the benchmark's invariant style: round trips and
 differential checks that re-derive the answer from the documented contract
 and compare, so a wrong result crashes exactly like a panic does.
@@ -32,8 +32,8 @@ this is test code and asserts freely.
 
 ## Ports
 
-None: the harness depends on `timbre-kernel` and `timbre-edge-http` directly
-(fuzzing is allowed to know concrete crates; modules are not).
+None: the harness directly drives the kernel, edge crates and the library's
+LRC parser. Only fuzzing may know concrete modules.
 
 ## Signals
 

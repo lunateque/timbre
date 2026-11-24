@@ -1,0 +1,8 @@
+# Tag keys and crate names are identifiers, not English words: ID3v2 frame ids
+# (TPE1, TPOS), MP4 atoms (nam, wrk) and the `flate2` crate.
+[default.extend-words]
+nam = "nam"
+wrk = "wrk"
+tpe = "tpe"
+tpos = "tpos"
+flate = "flate"

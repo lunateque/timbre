@@ -1,0 +1,20 @@
+[package]
+name = "timbre-edge-tags"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+fuzzing = []
+fixtures = []
+
+[dependencies]
+lofty.workspace = true
+serde = { workspace = true, features = ["derive"] }
+timbre-kernel.workspace = true
+xxhash-rust.workspace = true
+
+[lints]
+workspace = true

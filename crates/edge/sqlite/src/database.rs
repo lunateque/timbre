@@ -3,6 +3,7 @@
 use crate::failures::{SqliteFailure, open_error, query_error};
 use crate::gate::Gate;
 use crate::pool::{Lease, Pool};
+use crate::tables::{owner_of, valid_table_name};
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -55,21 +56,16 @@ impl Database {
         statement_timeout: Duration,
         readers: usize,
     ) -> Fallible<Database> {
-        let open = || {
-            Connection::open_with_flags(
-                path,
-                OpenFlags::SQLITE_OPEN_READ_WRITE
-                    | OpenFlags::SQLITE_OPEN_CREATE
-                    | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .map_err(open_error)
-        };
-        let configure = |connection: &Connection| {
-            for statement in [
-                "PRAGMA journal_mode = WAL",
-                "PRAGMA busy_timeout = 5000",
-                "PRAGMA foreign_keys = ON",
-            ] {
+        let open = |flags| Connection::open_with_flags(path, flags).map_err(open_error);
+        let writable = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        // A reader that cannot write is one less way a query bug, or a
+        // statement smuggled into `read`, changes stored data; the journal
+        // mode belongs to the writer's connection, which creates the file.
+        let readable = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let configure = |connection: &Connection, statements: &[&str]| {
+            for statement in statements {
                 connection.execute_batch(statement).map_err(open_error)?;
             }
             Ok(())
@@ -80,12 +76,19 @@ impl Database {
             arm_watchdog(&mut connection, statement_timeout).map_err(open_error)?;
             Ok(connection)
         };
-        let writer = arm(open()?)?;
-        configure(&writer)?;
+        let writer = arm(open(writable)?)?;
+        configure(
+            &writer,
+            &[
+                "PRAGMA journal_mode = WAL",
+                "PRAGMA busy_timeout = 5000",
+                "PRAGMA foreign_keys = ON",
+            ],
+        )?;
         let mut pool = Vec::new();
         for _ in 0..readers {
-            let reader = arm(open()?)?;
-            configure(&reader)?;
+            let reader = arm(open(readable)?)?;
+            configure(&reader, &["PRAGMA busy_timeout = 5000"])?;
             pool.push(reader);
         }
         // SQLite creates the -wal and -shm siblings on the first write; the
@@ -281,8 +284,13 @@ impl Database {
     /// `sqlite.query_failed` when the catalog cannot be read.
     pub fn owned_tables(&self, registered_modules: &[&str]) -> Fallible<Vec<String>> {
         let guard = self.lease()?;
+        // The underscore is a LIKE wildcard: without ESCAPE a table named
+        // `sqlitex_...` would pass for an internal one and never be pruned.
         let mut statement = guard
-            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' \
+                 AND name NOT LIKE 'sqlite\\_%' ESCAPE '\\' ORDER BY name",
+            )
             .map_err(query_error)?;
         let names: Vec<String> = statement
             .query_map([], |row| row.get::<_, String>(0))
@@ -366,34 +374,6 @@ fn arm_watchdog(connection: &mut Connection, limit: Duration) -> rusqlite::Resul
         }),
     )?;
     Ok(())
-}
-
-/// The module that owns `name`: the registered module whose `<module>_`
-/// prefix is the longest one `name` starts with. `stream_v2_rows` belongs to
-/// `stream_v2`, not to `stream`, when both are registered.
-///
-/// The xtask `migrations` check enforces at build time that a module only
-/// ever creates tables prefixed with its own name; this is the runtime side
-/// of that rule, and anything that matches no registered module is orphaned.
-fn owner_of<'a>(name: &str, registered_modules: &[&'a str]) -> Option<&'a str> {
-    registered_modules
-        .iter()
-        .copied()
-        .filter(|module| {
-            name.len() > module.len()
-                && name.starts_with(module)
-                && name.as_bytes().get(module.len()) == Some(&b'_')
-        })
-        .max_by_key(|module| module.len())
-}
-
-/// Whether `name` is plain enough to interpolate into `DROP TABLE`.
-fn valid_table_name(name: &str) -> bool {
-    let mut bytes = name.bytes();
-    let first_ok = bytes
-        .next()
-        .is_some_and(|byte| byte.is_ascii_lowercase() || byte == b'_');
-    first_ok && bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
 }
 
 #[cfg(test)]
