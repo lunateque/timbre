@@ -1,0 +1,18 @@
+[package]
+name = "timbre-activity"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+timbre-kernel.workspace = true
+timbre-edge-config.workspace = true
+timbre-edge-sqlite.workspace = true
+
+[dev-dependencies]
+timbre-kernel = { workspace = true, features = ["testing"] }

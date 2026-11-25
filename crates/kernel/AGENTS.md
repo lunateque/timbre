@@ -45,9 +45,10 @@ plus the `AccessDenied` signal.
 
 ## Ports
 
-`Catalog`, `Artwork`, `LibraryTree`, `Folders` and `Directory` describe the
-music catalog, art, scanned directory tree, visible folder browsing and the
-paged account/device listing respectively.
+`Catalog`, `Artwork`, `LibraryTree`, `Folders`, `Directory`, `Activity` and
+`Playlists` describe the music catalog, art, scanned directory tree, visible
+folder browsing, paged account/device listing, per-user listening activity and
+user-owned playlists respectively.
 Consumers must tolerate a port's absence. The host
 installs shared runtime resources at `Registry::finish_with_resources`;
 modules can read them with `Ctx::resource` but cannot register resources.
@@ -72,7 +73,7 @@ cursor paging: it takes a count and an offset per category, because one
 
 A port implementation decodes its request with `page::Window`:
 `Window::check_limit` refuses an oversize `limit` with
-`kernel.page_too_large`, `Window::from_offset` rejects a malformed cursor
+`kernel.page_too_large`, `Window::new` rejects a malformed cursor
 with `kernel.cursor_invalid`, and the window takes the lookahead row.
 Concurrent inserts or deletes can shift later offset pages.
 
@@ -89,8 +90,9 @@ The edge crates still carry private copies of the same helpers.
 The built-in signals are:
 
 - `Started`, published by the binary before starting jobs.
-- `ServerDrained`, published by the binary only after a successful HTTP
-  return and the bounded shutdown wait for jobs.
+- `ServerDrained`, published by the binary after HTTP stops accepting and the
+  bounded shutdown wait for jobs finishes, whether serving ended cleanly or
+  with a failure.
 - `UserAdded`, `UserRemoved`, `PermissionsChanged`, `DeviceIssued` and
   `DeviceRevoked`, published by the `auth` module; users are identified by
   canonical `UserName`.
@@ -99,6 +101,8 @@ The built-in signals are:
   text was not a user name.
 - `AccessDenied`, published after every forbidden request: client, canonical
   user, required permission.
+- `Played`, published by `activity` after every committed play submission:
+  canonical user, track id and play timestamp.
 
 ## Failures
 

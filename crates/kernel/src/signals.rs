@@ -5,6 +5,7 @@ use crate::credential::{RejectDetail, RejectReason};
 use crate::identity::{Permission, UserName};
 use crate::secret::Secret;
 use std::net::IpAddr;
+use std::time::SystemTime;
 
 /// Published once after every module is registered: the server is running.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,3 +117,18 @@ pub struct AccessDenied {
 }
 
 impl Signal for AccessDenied {}
+
+/// A user completed a play submission for a track; external scrobblers and
+/// other listening-history consumers subscribe here without touching the
+/// module that stores plays.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Played {
+    /// The canonical user who played the track.
+    pub user: UserName,
+    /// Opaque catalog track id.
+    pub track: String,
+    /// When the play occurred.
+    pub at: SystemTime,
+}
+
+impl Signal for Played {}

@@ -6,12 +6,14 @@ use timbre_kernel::{Fallible, Registry};
 // registration lines are generated into.
 #[cfg_attr(
     not(any(
+        feature = "activity",
         feature = "audit",
         feature = "auth",
         feature = "auth_guard",
         feature = "folders",
         feature = "hello",
-        feature = "library"
+        feature = "library",
+        feature = "playlists"
     )),
     expect(
         clippy::unnecessary_wraps,
@@ -20,6 +22,8 @@ use timbre_kernel::{Fallible, Registry};
 )]
 pub(crate) fn registry() -> Fallible<Registry> {
     let registry = Registry::new();
+    #[cfg(feature = "activity")]
+    let registry = registry.module("activity", timbre_activity::register)?;
     #[cfg(feature = "audit")]
     let registry = registry.module("audit", timbre_audit::register)?;
     #[cfg(feature = "auth")]
@@ -32,5 +36,7 @@ pub(crate) fn registry() -> Fallible<Registry> {
     let registry = registry.module("hello", timbre_hello::register)?;
     #[cfg(feature = "library")]
     let registry = registry.module("library", timbre_library::register)?;
+    #[cfg(feature = "playlists")]
+    let registry = registry.module("playlists", timbre_playlists::register)?;
     Ok(registry)
 }

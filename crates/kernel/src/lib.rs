@@ -31,6 +31,7 @@
 
 #![warn(missing_docs)]
 
+pub mod activity;
 pub mod artwork;
 mod bus;
 pub mod catalog;
@@ -50,12 +51,14 @@ mod log;
 pub mod migration;
 mod names;
 pub mod page;
+pub mod playlists;
 mod port;
 mod registry;
 mod resources;
 pub mod route;
 mod runtime;
 mod secret;
+pub mod text;
 
 pub mod failures;
 pub mod http;

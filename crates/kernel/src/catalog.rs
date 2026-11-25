@@ -159,10 +159,50 @@ pub trait Catalog: Port {
     fn track(&self, ctx: &Ctx, id: &str) -> Fallible<Track>;
 
     /// Tracks in input order, including repeated ids, omitting missing ids.
+    /// `ids.len()` above [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) is refused
+    /// with `kernel.page_too_large`.
     ///
     /// # Errors
-    /// Returns a failure if the page cannot be read.
+    /// Returns a failure if `ids` or `page.limit` exceeds the cap, or the page
+    /// cannot be read.
     fn tracks(&self, ctx: &Ctx, ids: &[&str], page: PageRequest<'_>) -> Fallible<Page<Track>>;
+
+    /// Lightweight existence and duration lookup for track ids, omitting
+    /// missing ids without hydrating full track metadata or credits.
+    /// `ids.len()` above [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) is refused
+    /// with `kernel.page_too_large`.
+    ///
+    /// # Errors
+    /// Returns a failure if `ids` exceeds the cap or storage cannot be read.
+    fn track_durations(&self, ctx: &Ctx, ids: &[&str]) -> Fallible<Vec<(String, Duration)>>;
+
+    /// Albums in input order, including repeated ids, omitting missing ids.
+    /// `ids.len()` above [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) is refused
+    /// with `kernel.page_too_large`.
+    ///
+    /// # Errors
+    /// Returns a failure if `ids` or `page.limit` exceeds the cap, or the page
+    /// cannot be read.
+    fn albums_by_ids(
+        &self,
+        ctx: &Ctx,
+        ids: &[&str],
+        page: PageRequest<'_>,
+    ) -> Fallible<Page<Album>>;
+
+    /// Artists in input order, including repeated ids, omitting missing ids.
+    /// `ids.len()` above [`MAX_PAGE_LIMIT`](crate::MAX_PAGE_LIMIT) is refused
+    /// with `kernel.page_too_large`.
+    ///
+    /// # Errors
+    /// Returns a failure if `ids` or `page.limit` exceeds the cap, or the page
+    /// cannot be read.
+    fn artists_by_ids(
+        &self,
+        ctx: &Ctx,
+        ids: &[&str],
+        page: PageRequest<'_>,
+    ) -> Fallible<Page<Artist>>;
 
     /// Albums in the chosen [`AlbumOrder`], with ties by id.
     ///

@@ -9,8 +9,9 @@ Point Timbre at the music on your computer or NAS and listen through the apps yo
 [OpenSubsonic](https://opensubsonic.netlify.app). Every feature is a module you can pull out, and the server keeps
 running without it.
 
-> **Not ready to play music yet.** The core, the library scanner, the folder view and user accounts with per-device
-> keys are built; the OpenSubsonic API and streaming come next. Follow the progress at [timbre.page](https://timbre.page).
+> **Not ready to play music yet.** The core, the library scanner, the folder view, user accounts with per-device
+> keys, listening activity and playlists are built; streaming and the OpenSubsonic API come next. Follow the progress
+> at [timbre.page](https://timbre.page).
 
 ## Modules
 

@@ -10,7 +10,9 @@ pub(crate) fn one<T>(
     values: impl Params,
     map: impl FnOnce(&Row<'_>) -> timbre_edge_sqlite::rusqlite::Result<T>,
 ) -> Fallible<T> {
-    sql.query_row(query, values, map)
+    sql.prepare_cached(query)
+        .map_err(query_error)?
+        .query_row(values, map)
         .optional()
         .map_err(query_error)?
         .ok_or_else(|| LibraryFailure::NotFound.boxed())
@@ -47,7 +49,13 @@ pub(crate) fn diagnose(sql: &Connection, track: i64, kind: &str, detail: &str) -
 }
 
 pub(crate) fn id(value: &str) -> Fallible<i64> {
-    value.parse().map_err(|_| LibraryFailure::NotFound.boxed())
+    let parsed: i64 = value
+        .parse()
+        .map_err(|_| LibraryFailure::NotFound.boxed())?;
+    if parsed <= 0 || parsed.to_string() != value {
+        return Err(LibraryFailure::NotFound.boxed());
+    }
+    Ok(parsed)
 }
 
 pub(crate) fn integer(value: u64) -> i64 {

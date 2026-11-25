@@ -105,6 +105,12 @@ impl UserName {
         }
     }
 
+    /// Parse a persisted name that must already be in canonical form.
+    #[must_use]
+    pub fn parse_canonical(input: &str) -> Option<Self> {
+        is_valid_user_name(input).then(|| Self(input.to_owned()))
+    }
+
     /// The canonical name as text.
     #[must_use]
     pub fn as_str(&self) -> &str {

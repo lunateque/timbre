@@ -1069,6 +1069,7 @@ dependencies = [
 name = "timbre"
 version = "0.0.0"
 dependencies = [
+ "timbre-activity",
  "timbre-audit",
  "timbre-auth",
  "timbre-auth_guard",
@@ -1080,6 +1081,16 @@ dependencies = [
  "timbre-hello",
  "timbre-kernel",
  "timbre-library",
+ "timbre-playlists",
+]
+
+[[package]]
+name = "timbre-activity"
+version = "0.0.0"
+dependencies = [
+ "timbre-edge-config",
+ "timbre-edge-sqlite",
+ "timbre-kernel",
 ]
 
 [[package]]
@@ -1230,6 +1241,16 @@ dependencies = [
  "timbre-edge-sqlite",
  "timbre-edge-tags",
  "timbre-edge-text",
+ "timbre-kernel",
+]
+
+[[package]]
+name = "timbre-playlists"
+version = "0.0.0"
+dependencies = [
+ "timbre-edge-config",
+ "timbre-edge-crypto",
+ "timbre-edge-sqlite",
  "timbre-kernel",
 ]
 

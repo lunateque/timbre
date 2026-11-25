@@ -60,19 +60,86 @@ impl Catalog for Library {
     }
 
     fn tracks(&self, ctx: &Ctx, tracks: &[&str], page: PageRequest<'_>) -> Fallible<Page<Track>> {
+        Window::check_limit(tracks.len())?;
         let win = Window::new(page)?;
-        shared_db(ctx)?.get(ctx)?.read(|sql| {
-            let mut matching = Vec::new();
-            let mut skip = win.offset();
+        shared_db(ctx)?.get(ctx)?.read_transaction(|sql| {
+            by_ids(
+                sql,
+                tracks,
+                "SELECT EXISTS(SELECT 1 FROM library_tracks WHERE id=?1 AND album_id IS NOT NULL)",
+                win,
+                views::track,
+            )
+        })
+    }
+
+    fn track_durations(
+        &self,
+        ctx: &Ctx,
+        tracks: &[&str],
+    ) -> Fallible<Vec<(String, std::time::Duration)>> {
+        Window::check_limit(tracks.len())?;
+        if tracks.is_empty() {
+            return Ok(Vec::new());
+        }
+        shared_db(ctx)?.get(ctx)?.read_transaction(|sql| {
+            let mut found = Vec::new();
             for input in tracks {
-                let Ok(track) = id(input) else { continue };
-                let exists: bool = one(sql, "SELECT EXISTS(SELECT 1 FROM library_tracks WHERE id=?1 AND album_id IS NOT NULL)", [track], |row| row.get(0))?;
-                if !exists { continue; }
-                if skip != 0 { skip -= 1; continue; }
-                matching.push(track);
-                if matching.len() > win.count() { break; }
+                let Ok(track_id) = id(input) else { continue };
+                let result = one(
+                    sql,
+                    "SELECT source FROM library_tracks WHERE id=?1 AND album_id IS NOT NULL",
+                    [track_id],
+                    |row| row.get::<_, String>(0),
+                );
+                match result {
+                    Ok(raw) => {
+                        let source: crate::scan::Source = timbre_edge_sqlite::json::decode(&raw)?;
+                        found.push((track_id.to_string(), source.properties.duration));
+                    }
+                    Err(failure) if failure.status() == 404 => {}
+                    Err(failure) => return Err(failure),
+                }
             }
-            hydrate_page(sql, matching, win, views::track)
+            Ok(found)
+        })
+    }
+
+    fn albums_by_ids(
+        &self,
+        ctx: &Ctx,
+        albums: &[&str],
+        page: PageRequest<'_>,
+    ) -> Fallible<Page<Album>> {
+        Window::check_limit(albums.len())?;
+        let win = Window::new(page)?;
+        shared_db(ctx)?.get(ctx)?.read_transaction(|sql| {
+            by_ids(
+                sql,
+                albums,
+                "SELECT EXISTS(SELECT 1 FROM library_albums WHERE id=?1)",
+                win,
+                views::album,
+            )
+        })
+    }
+
+    fn artists_by_ids(
+        &self,
+        ctx: &Ctx,
+        artists: &[&str],
+        page: PageRequest<'_>,
+    ) -> Fallible<Page<Artist>> {
+        Window::check_limit(artists.len())?;
+        let win = Window::new(page)?;
+        shared_db(ctx)?.get(ctx)?.read_transaction(|sql| {
+            by_ids(
+                sql,
+                artists,
+                "SELECT EXISTS(SELECT 1 FROM library_artists WHERE id=?1)",
+                win,
+                views::artist,
+            )
         })
     }
 
@@ -198,6 +265,33 @@ fn aiff_codec(code: [u8; 4]) -> String {
     }
 }
 
+fn by_ids<T>(
+    sql: &Connection,
+    inputs: &[&str],
+    exists_query: &str,
+    win: Window,
+    read: impl Fn(&Connection, i64) -> Fallible<T>,
+) -> Fallible<Page<T>> {
+    let mut matching = Vec::new();
+    let mut skip = win.offset();
+    for input in inputs {
+        let Ok(row_id) = id(input) else { continue };
+        let exists: bool = one(sql, exists_query, [row_id], |row| row.get(0))?;
+        if !exists {
+            continue;
+        }
+        if skip != 0 {
+            skip -= 1;
+            continue;
+        }
+        matching.push(row_id);
+        if matching.len() > win.count() {
+            break;
+        }
+    }
+    hydrate_page(sql, matching, win, read)
+}
+
 fn ids<T>(
     sql: &Connection,
     query: &str,
@@ -232,7 +326,7 @@ fn browse(sql: &Connection, order: &AlbumOrder<'_>, win: Window) -> Fallible<Pag
         ),
         AlbumOrder::Random => all(
             sql,
-            "SELECT a.id FROM library_albums a CROSS JOIN library_state s ORDER BY ((a.id * 1103515245 + s.tree_version * 12345) & 2147483647),a.id LIMIT ?1 OFFSET ?2",
+            "SELECT a.id FROM library_albums a CROSS JOIN library_state s ORDER BY (((a.id & 2147483647) * 1103515245 + (s.tree_version & 2147483647) * 12345) & 2147483647),a.id LIMIT ?1 OFFSET ?2",
             page,
             |row| row.get(0),
         ),

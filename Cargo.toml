@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/kernel", "crates/timbre", "crates/modules/audit", "crates/modules/auth", "crates/modules/auth_guard", "crates/modules/folders", "crates/modules/hello", "crates/modules/library", "crates/edge/runtime", "crates/edge/http", "crates/edge/sqlite", "crates/edge/config", "crates/edge/crypto", "crates/edge/tags", "crates/edge/image", "crates/edge/fswatch", "crates/edge/text", "xtask"]
+members = ["crates/kernel", "crates/timbre", "crates/modules/activity", "crates/modules/audit", "crates/modules/auth", "crates/modules/auth_guard", "crates/modules/folders", "crates/modules/hello", "crates/modules/library", "crates/modules/playlists", "crates/edge/runtime", "crates/edge/http", "crates/edge/sqlite", "crates/edge/config", "crates/edge/crypto", "crates/edge/tags", "crates/edge/image", "crates/edge/fswatch", "crates/edge/text", "xtask"]
 # `fuzz/` is its own workspace (own `[workspace]` and lockfile): nightly and
 # clang live there and the stable gate must not resolve or build it.
 exclude = ["fuzz"]
@@ -46,12 +46,14 @@ timbre-edge-sqlite = { path = "crates/edge/sqlite" }
 timbre-edge-tags = { path = "crates/edge/tags" }
 timbre-edge-text = { path = "crates/edge/text" }
 timbre-kernel = { path = "crates/kernel" }
+timbre-activity = { path = "crates/modules/activity" }
 timbre-audit = { path = "crates/modules/audit" }
 timbre-auth = { path = "crates/modules/auth" }
 timbre-auth_guard = { path = "crates/modules/auth_guard" }
 timbre-folders = { path = "crates/modules/folders" }
 timbre-hello = { path = "crates/modules/hello" }
 timbre-library = { path = "crates/modules/library" }
+timbre-playlists = { path = "crates/modules/playlists" }
 tokio = "1.54.1"
 toml = "1.2.1"
 xxhash-rust = { version = "=0.8.21", features = ["xxh3"] }

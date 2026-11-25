@@ -129,9 +129,7 @@ fn user_name(ctx: &Ctx, value: &str) -> Fallible<UserName> {
 }
 
 fn stored_user(value: &str) -> Fallible<UserName> {
-    UserName::normalize(value)
-        .ok()
-        .filter(|name| name.as_str() == value)
+    UserName::parse_canonical(value)
         .ok_or_else(|| failures::AuthFailure::StoredUserInvalid(value.to_owned()).boxed())
 }
 
